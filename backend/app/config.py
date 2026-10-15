@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+BACKEND_DIR = ROOT_DIR / "backend"
+FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
+
+load_dotenv(ROOT_DIR / ".env")
+load_dotenv(BACKEND_DIR / ".env")
+
+
+def _env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+@dataclass(frozen=True)
+class Settings:
+    anthropic_api_key: str = _env("ANTHROPIC_API_KEY")
+    band_user_api_key: str = _env("BAND_USER_API_KEY")
+    master_agent_name: str = _env("MASTER_AGENT_NAME", "Master")
+    band_rest_url: str = _env("BAND_REST_URL", "https://app.band.ai")
+    band_ws_url: str = _env("BAND_WS_URL", "wss://app.band.ai/api/v1/socket/websocket")
+    app_secret: str = _env("APP_SECRET", "dev-secret-change-me")
+    database_url: str = _env("DATABASE_URL", f"sqlite:///{(BACKEND_DIR / 'band_slack.db').as_posix()}")
+    default_model: str = _env("DEFAULT_MODEL", "claude-sonnet-5-5")
+    poll_seconds: float = float(_env("BAND_POLL_SECONDS", "5"))
+
+
+settings = Settings()
+
+MODELS = [
+    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast)"},
+    {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5 (balanced)"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8 (most capable)"},
+]

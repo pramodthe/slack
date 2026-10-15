@@ -1,0 +1,16 @@
+# secrets
+.env
+agent_config.yaml
+
+# python
+__pycache__/
+*.pyc
+backend/.venv/
+backend/*.db
+
+# node
+frontend/node_modules/
+frontend/dist/
+
+# test caches
+.pytest_cache/
