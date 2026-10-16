@@ -37,6 +37,7 @@ def computer_tools(task: AgentTask, computer: TaskComputer):
         """Run Python on your Daytona computer for this channel (30s limit). Never executes on the host.
 
         Files persist across calls and later tasks; Python variables do not. Requires DAYTONA_API_KEY.
+        Starting the computer can take a while: if you have code_execution, use it for quick calculations instead.
         """
         return await computer_call(lambda: computer.command(code, python=True))
 

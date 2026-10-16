@@ -94,6 +94,15 @@ class AgentTask(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class MessageDraft(SQLModel, table=True):
+    """The reply an agent is still writing; removed when the task's final message is committed."""
+    task_id: str = Field(primary_key=True)
+    channel_id: int = Field(index=True)
+    agent_id: int
+    content: str
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class AgentMemory(SQLModel, table=True):
     agent_id: int = Field(primary_key=True)
     channel_id: int = Field(primary_key=True)

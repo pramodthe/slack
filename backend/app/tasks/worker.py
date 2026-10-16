@@ -12,14 +12,15 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from deepagents.backends.utils import file_data_to_string
 from sqlmodel import select
-from sqlalchemy import update
+from sqlalchemy import delete, update
 
 from app.auth import decrypt_secret
 from app.config import settings
 from app.runtime.harness import build_harness
 from app.runtime.tools.mcp import integration_tools
 from app.computer import TaskComputer
-from app.persistence.models import AgentProfile, AgentTask, Message, db, init_db, utcnow
+from app.persistence.models import AgentProfile, AgentTask, Message, MessageDraft, db, init_db, utcnow
+from app.tasks.drafts import Draft, answer_text, clear_draft
 from app.tasks.schedules import fire_due
 from app.tasks.queue import (approval_decisions, await_approval, is_interim, next_task, queue_report, recover_tasks,
                              report_target, update_task)
@@ -50,6 +51,15 @@ def _requests(snapshot) -> list[tuple[str, dict]]:
             for item in snapshot.interrupts]
 
 
+def server_action(message) -> str:
+    """Progress label for provider-side tools, which run inside the model call rather than as tool calls."""
+    content = getattr(message, "content", "")
+    blocks = content if isinstance(content, list) else []
+    if any(isinstance(b, dict) and b.get("type") == "server_tool_use" for b in blocks):
+        return "Running code in a quick sandbox"
+    return ""
+
+
 def describe_call(call: dict) -> str:
     if call["name"] == "task":
         return f"Asking the {call['args'].get('subagent_type') or 'general-purpose'} helper"
@@ -70,8 +80,11 @@ async def execute(task: AgentTask, checkpointer, *, factory=build_harness, compu
 async def _execute_on_computer(task: AgentTask, checkpointer, *, factory, computer) -> str:
     with db() as session:
         profile = session.get(AgentProfile, task.agent_id)
+        # Report-backs and interim statuses are agent chatter; only answers for people stream.
+        draft = Draft(task, enabled=report_target(session, task) is None and not is_interim(session, task))
     if profile is None:
         raise ValueError("Agent was deleted before this task could finish")
+    clear_draft(task.id)
     extra_tools = await integration_tools(profile.name)
     graph = factory(task, profile, checkpointer, computer=computer, extra_tools=extra_tools)
     config = config_for(task)
@@ -88,16 +101,21 @@ async def _execute_on_computer(task: AgentTask, checkpointer, *, factory, comput
                 raise ApprovalRequired(requests)
             inputs = Command(resume=decisions)
         action, step = "", ""
-        async for _namespace, update in graph.astream(inputs, config, stream_mode="updates",
-                                                     subgraphs=True, durability="sync"):
+        async for namespace, mode, data in graph.astream(inputs, config, stream_mode=["updates", "messages"],
+                                                         subgraphs=True, durability="sync"):
+            if mode == "messages":
+                draft.feed(namespace, *data)
+                continue
+            draft.flush()
             previous = (action, step)
-            for _node, value in update.items():
+            for _node, value in data.items():
                 if not isinstance(value, dict):
                     continue
                 if todos := value.get("todos"):
                     current = next((i for i, t in enumerate(todos) if t["status"] == "in_progress"), None)
                     step = "" if current is None else f"Step {current + 1}/{len(todos)}: {todos[current]['content']}"
                 for message in value.get("messages", []):
+                    action = server_action(message) or action
                     for call in getattr(message, "tool_calls", []):
                         action = describe_call(call)
                     if getattr(message, "type", "") == "tool":
@@ -126,7 +144,7 @@ async def _execute_on_computer(task: AgentTask, checkpointer, *, factory, comput
     update_task(task.id, artifacts=artifacts)
     for message in reversed(final.get("messages", [])):
         if getattr(message, "type", "") == "ai" and not getattr(message, "tool_calls", []):
-            text = message.text
+            text = answer_text(message)
             if text.strip():
                 return text[:60000]
     raise ValueError("Agent finished without a final answer")
@@ -158,6 +176,7 @@ def complete(task: AgentTask, result: str) -> None:
         else:
             session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running",
                          AgentTask.cancel_requested == True).values(status="cancelled", progress="Cancelled"))
+        session.exec(delete(MessageDraft).where(MessageDraft.task_id == task.id))
         session.commit()
 
 
@@ -209,12 +228,14 @@ async def process(task: AgentTask, saver, *, executor=execute) -> None:
                 if current.cancel_requested:
                     runner.cancel()
                     await asyncio.gather(runner, return_exceptions=True)
+                    clear_draft(task.id)
                     update_task(task.id, status="cancelled", progress="Cancelled")
                     return
                 await asyncio.wait({runner}, timeout=0.5)
             result = await runner
             complete(task, result)
     except ApprovalRequired as paused:
+        clear_draft(task.id)
         await_approval(task, paused.requests)
     except asyncio.CancelledError:
         runner.cancel()
@@ -224,6 +245,7 @@ async def process(task: AgentTask, saver, *, executor=execute) -> None:
     except Exception as exc:
         runner.cancel()
         await asyncio.gather(runner, return_exceptions=True)
+        clear_draft(task.id)
         # Keep raw provider errors out of the UI (they can include credentials/headers).
         logger.exception("Task %s failed", task.id)
         update_task(task.id, status="failed", progress="Task failed; retry to resume saved progress",
@@ -256,6 +278,7 @@ async def work() -> None:
     with open(str(path) + ".worker.lock", "w") as lock:
         _lock_exclusively(lock)
         recover_tasks()
+        clear_draft()
         # A crash between send and receipt cannot safely be retried.
         with db() as session:
             for task in session.exec(select(AgentTask).where(AgentTask.delivery_status == "sending")).all():

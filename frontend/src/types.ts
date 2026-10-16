@@ -102,8 +102,16 @@ export interface Bootstrap {
   anthropic_configured: boolean;
 }
 
+export interface Draft {
+  task_id: string;
+  channel_id: number;
+  agent_id: number;
+  content: string;
+}
+
 export type ServerEvent =
   | { type: "message"; message: Message }
+  | ({ type: "draft" } & Draft)
   | { type: "channel"; channel: Channel }
   | { type: "user"; user: User }
   | { type: "presence"; user_id: number; online: boolean }

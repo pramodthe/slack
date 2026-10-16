@@ -15,6 +15,7 @@ from app.runtime.helpers.critic import critic
 from app.runtime.helpers.general_purpose import general_purpose
 from app.runtime.helpers.researcher import researcher
 from app.runtime.tools import tools_for
+from app.runtime.tools.hosted import hosted_tools
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 
 
@@ -24,14 +25,21 @@ def build_harness(task: AgentTask, profile: AgentProfile, checkpointer, *, model
                                   max_tokens=4096, timeout=60, max_retries=2)
     tools = tools_for(task, computer) + list(extra_tools)
     integrations = sorted({t.name.split("__", 1)[0] for t in extra_tools})
-    by_name = {t.name: t for t in tools}
+    hosted = hosted_tools(profile.model)
+    by_name = {t.name: t for t in tools} | {t["name"]: t for t in hosted}
+    code_tools = ("For calculations, checking numbers, and self-contained data work, use code_execution: it runs "
+                  "instantly in a separate cloud sandbox that cannot see your computer's files. Use the coder helper "
+                  "or sandbox_exec on your computer only when the work needs its files, installed packages, or the network. "
+                  if hosted else "Use the coder helper or run_python for calculations and data work. ")
+    # Models reach for run_python over code_execution even when told not to, which boots the computer for 2 + 2.
+    parent_tools = [t for t in tools if not (hosted and t.name == "run_python")] + hosted
     subagents = [general_purpose(by_name), researcher(by_name), coder(by_name), computer_helper(by_name), critic(by_name)]
     role = MASTER_ROLE if profile.is_master else ROLES.get(profile.role, ROLES["custom"])
     with db() as session:
         teammates = [a for a in session.exec(select(AgentProfile)).all() if a.id != profile.id]
     roster = "; ".join(f"{a.name} ({role_label(a.role)})" for a in teammates) or "none yet"
     return create_deep_agent(
-        model=model, checkpointer=checkpointer, tools=tools, subagents=subagents,
+        model=model, checkpointer=checkpointer, tools=parent_tools, subagents=subagents,
         middleware=[TodoListMiddleware(), ModelCallLimitMiddleware(run_limit=40, thread_limit=120, exit_behavior="error")], name="workspace-agent",
         system_prompt=(
             f"You are {profile.name}, the {role['label']} in a shared chat workspace.\n"
@@ -44,8 +52,9 @@ def build_harness(task: AgentTask, profile: AgentProfile, checkpointer, *, model
             "until it expires after a long idle period. Virtual draft files are separate from it. Use sandbox_write_file to transfer text, "
             "and sandbox_export_file to make computer deliverables downloadable. You have no host filesystem access. "
             "Use the cheapest tool that can do the job. Answer from knowledge, memory, or channel history when they suffice. "
-            "Use web_search to find sources and fetch_page to read a specific URL. Use the coder helper or run_python "
-            "for calculations and data work. Use the computer helper only when a real browser or desktop is required: "
+            "Use web_search to find sources and fetch_page to read a specific URL. "
+            + code_tools +
+            "Use the computer helper only when a real browser or desktop is required: "
             "logging in, filling forms, interactive or script-heavy pages, checking how something looks, or when "
             "fetch_page cannot read a page the user needs. Never use the computer only to read a page. "
             "Delegate GUI/browser work to a single computer helper. Avoid concurrent code/desktop workflows on the shared computer. "
