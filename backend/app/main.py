@@ -6,7 +6,7 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -20,7 +20,10 @@ from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMe
 from app.roles import ROLES
 from app.schedules import cancel_schedule, channel_schedules, describe, serialize_schedule
 from app.tasks import decide_approval, serialize_task, update_task
-from app.computer import computer_key, sandbox_record
+from daytona import DaytonaError
+
+from app.computer import (TRANSFER_LIMIT, ComputerUnavailable, TaskComputer, active_control, computer_key,
+                          release_control, sandbox_record, take_control)
 from app.service import ServiceError, serialize_message, serialize_user, service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -325,6 +328,7 @@ async def task_computer(task_id: str, user: User = Depends(current_user), sessio
     # Computers persist per agent and channel; tasks from before that change kept their own.
     row = sandbox_record(computer_key(task)) or sandbox_record(task_id)
     return JSONResponse({
+        "control": _control_json(active_control(computer_key(task)), user),
         "configured": bool(settings.daytona_api_key),
         "status": row.status if row else "not_started",
         "sandbox_id": row.sandbox_id if row else None,
@@ -336,6 +340,122 @@ async def task_computer(task_id: str, user: User = Depends(current_user), sessio
         "error": row.error if row else None,
         "dashboard_url": "https://app.daytona.io/dashboard/sandboxes",
     }, headers={"Cache-Control": "no-store"})
+
+
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+def computer_factory(task: AgentTask) -> TaskComputer:
+    """Tests replace this to use a fake Daytona client."""
+    return TaskComputer(task)
+
+
+def _control_json(control, user: User) -> dict | None:
+    if control is None:
+        return None
+    return {"user_name": control.user_name, "until": control.until.isoformat(), "mine": control.user_id == user.id}
+
+
+def _member_task(session: Session, task_id: str, user: User) -> AgentTask:
+    task = _task_or_404(session, task_id)
+    _require_task_member(session, task, user)
+    return task
+
+
+def _agent_name(session: Session, task: AgentTask) -> str:
+    agent = session.get(AgentProfile, task.agent_id)
+    return agent.name if agent else "the agent"
+
+
+async def _on_computer(task: AgentTask, operation):
+    """Run a person's request on the agent's computer without stopping it afterwards."""
+    computer = computer_factory(task)
+    try:
+        return await operation(computer)
+    except ComputerUnavailable as exc:
+        raise HTTPException(409, str(exc))
+    except DaytonaError as exc:
+        # Daytona errors can include request details; show only the type.
+        logger.warning("Daytona request for task %s failed: %s", task.id, type(exc).__name__)
+        raise HTTPException(502, f"Daytona request failed ({type(exc).__name__})")
+    finally:
+        await computer.detach()
+
+
+class LiveBody(BaseModel):
+    control: bool = False
+
+
+@app.post("/api/tasks/{task_id}/computer/live")
+async def computer_live(task_id: str, body: LiveBody, user: User = Depends(current_user),
+                        session: Session = Depends(get_session)):
+    """A short-lived noVNC link. View-only is a client setting, so the link is limited to channel members."""
+    task = _member_task(session, task_id, user)
+    view = await _on_computer(task, lambda computer: computer.live_view())
+    key = computer_key(task)
+    if body.control:
+        control = take_control(key, user_id=user.id, user_name=user.display_name)
+        await service.system_message(task.channel_id, f"{user.display_name} took control of {_agent_name(session, task)}'s "
+                                                      "computer. The agent waits until it is handed back.")
+    else:
+        control = active_control(key)
+    return JSONResponse({**view, "control": _control_json(control, user)}, headers=NO_STORE)
+
+
+@app.delete("/api/tasks/{task_id}/computer/control")
+async def computer_release(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    task = _member_task(session, task_id, user)
+    if active_control(computer_key(task)):
+        release_control(computer_key(task), user_name=user.display_name)
+        await service.system_message(task.channel_id, f"{user.display_name} handed {_agent_name(session, task)}'s "
+                                                      "computer back.")
+    return {"ok": True}
+
+
+@app.get("/api/tasks/{task_id}/computer/files")
+async def computer_files(task_id: str, path: str = "", user: User = Depends(current_user),
+                         session: Session = Depends(get_session)):
+    task = _member_task(session, task_id, user)
+    entries = await _on_computer(task, lambda computer: computer.list_files(path))
+    return JSONResponse(entries, headers=NO_STORE)
+
+
+@app.get("/api/tasks/{task_id}/computer/files/download")
+async def computer_download(task_id: str, path: str, user: User = Depends(current_user),
+                            session: Session = Depends(get_session)):
+    task = _member_task(session, task_id, user)
+    content = await _on_computer(task, lambda computer: computer.download(path))
+    filename = re.sub(r"[^A-Za-z0-9._-]", "_", path.rstrip("/").rsplit("/", 1)[-1]) or "download"
+    return Response(content, media_type="application/octet-stream",
+                    headers={**NO_STORE, "Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.post("/api/tasks/{task_id}/computer/files")
+async def computer_upload(task_id: str, name: str, request: Request, user: User = Depends(current_user),
+                          session: Session = Depends(get_session)):
+    task = _member_task(session, task_id, user)
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > TRANSFER_LIMIT:
+            raise HTTPException(413, "Uploads support files up to 25 MB")
+    path = await _on_computer(task, lambda computer: computer.upload(name, bytes(content)))
+    # Agents read the channel, so this tells them where the file is.
+    await service.system_message(task.channel_id, f"{user.display_name} uploaded {name} to "
+                                                  f"{_agent_name(session, task)}'s computer at {path}.")
+    return {"path": path}
+
+
+@app.post("/api/tasks/{task_id}/computer/stop")
+async def computer_stop(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    task = _member_task(session, task_id, user)
+    if session.exec(select(AgentTask.id).where(AgentTask.agent_id == task.agent_id,
+                    AgentTask.channel_id == task.channel_id, AgentTask.status == "running")).first():
+        raise HTTPException(409, "The agent is using this computer. Cancel its task first.")
+    release_control(computer_key(task), user_name=user.display_name)
+    computer = computer_factory(task)
+    await computer.close()
+    return {"ok": True}
 
 
 @app.post("/api/tasks/{task_id}/cancel")

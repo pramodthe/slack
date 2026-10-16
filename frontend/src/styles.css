@@ -863,3 +863,6 @@ code {
 .computer-status { text-transform: capitalize; }
 .computer-screen { display: block; width: 100%; height: auto; border: 1px solid var(--border, #ddd); border-radius: 6px; background: #181818; }
 .computer-panel code { overflow-wrap: anywhere; }
+.computer-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.computer-live { display: block; width: 100%; height: 62vh; border: 1px solid var(--border, #ddd); border-radius: 6px; background: #181818; }
+.computer-control { padding: 6px 10px; border-radius: 6px; background: rgba(255, 196, 0, 0.12); border: 1px solid #d9a400; }

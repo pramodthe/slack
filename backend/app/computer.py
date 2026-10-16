@@ -6,20 +6,61 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import shlex
+from datetime import timedelta, timezone
 from uuid import uuid4
 
 from daytona import (AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaError, DaytonaForbiddenError,
                      DaytonaNotFoundError, DaytonaRateLimitError, ScreenshotOptions)
 
 from app.config import settings
-from app.models import AgentProfile, AgentTask, TaskSandbox, db, utcnow
+from app.models import AgentProfile, AgentTask, ComputerControl, TaskSandbox, db, utcnow
 
 logger = logging.getLogger(__name__)
 
 
 class ComputerUnavailable(RuntimeError):
     """An actionable message safe to show to the agent and user."""
+
+
+VNC_PORT = 6080  # Daytona's noVNC web client, served at /vnc.html
+TRANSFER_LIMIT = 25 * 1024 * 1024
+CONTROL_MINUTES = 15
+
+
+def active_control(key: str) -> ComputerControl | None:
+    with db() as session:
+        control = session.get(ComputerControl, key)
+    if control is None:
+        return None
+    until = control.until if control.until.tzinfo else control.until.replace(tzinfo=timezone.utc)
+    return control if until > utcnow() else None
+
+
+def take_control(key: str, *, user_id: int, user_name: str) -> ComputerControl:
+    """Pause the agent's input actions; its old screen ids become invalid because a person changes the screen."""
+    with db() as session:
+        control = session.get(ComputerControl, key) or ComputerControl(key=key, user_id=user_id, user_name=user_name,
+                                                                     until=utcnow())
+        control.user_id, control.user_name = user_id, user_name
+        control.until = utcnow() + timedelta(minutes=CONTROL_MINUTES)
+        session.add(control)
+        session.commit()
+        session.refresh(control)
+    if sandbox_record(key):
+        save_sandbox(key, frame_id="", last_action=f"{user_name} took control")
+    return control
+
+
+def release_control(key: str, *, user_name: str) -> None:
+    with db() as session:
+        control = session.get(ComputerControl, key)
+        if control:
+            session.delete(control)
+            session.commit()
+    if sandbox_record(key):
+        save_sandbox(key, frame_id="", last_action=f"{user_name} handed control back")
 
 
 def is_quota_error(exc: Exception) -> bool:
@@ -97,8 +138,11 @@ class TaskComputer:
         owner = hashlib.sha256(self.owner.encode()).hexdigest()[:12]
         return f"band-{workspace_id()[:8]}-{owner}-c{self.task.channel_id}"
 
-    async def ensure(self, *, desktop: bool = False):
-        """Caller holds lock. Persist a deterministic name before allocating cloud resources."""
+    async def ensure(self, *, desktop: bool = False, create: bool = True):
+        """Caller holds lock. Persist a deterministic name before allocating cloud resources.
+
+        People viewing a computer pass create=False: looking must never allocate a new one.
+        """
         if not settings.daytona_api_key:
             raise ComputerUnavailable("Daytona is not configured. Set DAYTONA_API_KEY to enable the computer.")
         if self.sandbox is None:
@@ -106,10 +150,17 @@ class TaskComputer:
                 self.client = self.client_factory(DaytonaConfig(
                     api_key=settings.daytona_api_key, api_url=settings.daytona_api_url,
                     target=settings.daytona_target or None))
-            record = sandbox_record(self.key) or save_sandbox(self.key, name=self.sandbox_name())
+            record = sandbox_record(self.key)
+            if record is None and not create:
+                raise ComputerUnavailable("This agent has no computer in this channel yet. "
+                                          "It starts one when it first needs desktop or code tools.")
+            record = record or save_sandbox(self.key, name=self.sandbox_name())
             try:
                 sandbox = await self.client.get(record.sandbox_id or record.name, request_timeout=30)
             except DaytonaNotFoundError:
+                if not create:
+                    raise ComputerUnavailable("This agent's computer in this channel has expired. "
+                                              "It starts a fresh one when it next needs desktop or code tools.") from None
                 if record.sandbox_id:
                     # Auto-delete removed the old computer. Replace it, and tell the agent its files are gone.
                     record = save_sandbox(self.key, sandbox_id=None, status="provisioning", frame_id="",
@@ -172,6 +223,13 @@ class TaskComputer:
             {"type": "image_url", "image_url": {"url": row.latest_image}},
         ]
 
+    def _check_control(self) -> None:
+        control = active_control(self.key)
+        if control:
+            raise ComputerUnavailable(
+                f"{control.user_name} is using this computer (until {control.until:%H:%M} UTC). Do not act on it now; "
+                "wait, ask them in your reply, or take a screenshot to watch.")
+
     async def screenshot(self) -> list[dict]:
         async with self.lock:
             await self.ensure(desktop=True)
@@ -182,6 +240,7 @@ class TaskComputer:
                      modifiers: list[str] | None = None, button: str = "left", double: bool = False,
                      direction: str = "down", amount: int = 3, seconds: float = 1) -> list[dict]:
         async with self.lock:
+            self._check_control()
             await self.ensure(desktop=True)
             row = sandbox_record(self.key)
             if not screen_id or screen_id != row.frame_id:
@@ -219,6 +278,7 @@ class TaskComputer:
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or len(url) > 4000:
             raise ComputerUnavailable("Use an http:// or https:// browser URL")
         async with self.lock:
+            self._check_control()
             sandbox = await self.ensure(desktop=True)
             save_sandbox(self.key, frame_id="", last_action="Opening browser")
             command = (
@@ -277,6 +337,7 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
 """
 
         async with self.lock:
+            self._check_control()
             sandbox = await self.ensure()
             save_sandbox(self.key, frame_id="", last_action="Running Python" if python else "Running command")
             result = await sandbox.process.exec("python3 -c " + shlex.quote(wrapper), timeout=40)
@@ -288,6 +349,7 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
         if not path.startswith("/") or len(path) > 500 or len(content.encode()) > 200000:
             raise ComputerUnavailable("Use an absolute sandbox path and content up to 200000 bytes")
         async with self.lock:
+            self._check_control()
             sandbox = await self.ensure()
             save_sandbox(self.key, frame_id="", last_action="Writing file")
             await sandbox.fs.upload_file(content.encode(), path, timeout=30)
@@ -318,6 +380,58 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
                 session.add(task)
                 session.commit()
             return {"path": path, "bytes": len(data), "download": "Available in task results"}
+
+    async def live_view(self, *, minutes: int = CONTROL_MINUTES) -> dict:
+        """A signed noVNC link for people. The token is in the link, so treat it as a short-lived secret."""
+        async with self.lock:
+            sandbox = await self.ensure(desktop=True, create=False)
+            signed = await sandbox.create_signed_preview_url(VNC_PORT, expires_in_seconds=minutes * 60)
+            return {"url": signed.url.rstrip("/") + "/vnc.html",
+                    "expires_at": (utcnow() + timedelta(minutes=minutes)).isoformat()}
+
+    async def list_files(self, path: str) -> list[dict]:
+        async with self.lock:
+            sandbox = await self.ensure(create=False)
+            entries = await sandbox.fs.list_files(path or ".", request_timeout=30)
+            return sorted(({"name": e.name, "path": e.path or f"{path.rstrip('/')}/{e.name}", "is_dir": e.is_dir,
+                            "size": e.size, "modified_at": e.modified_at} for e in entries),
+                          key=lambda e: (not e["is_dir"], e["name"].lower()))
+
+    async def download(self, path: str) -> bytes:
+        async with self.lock:
+            sandbox = await self.ensure(create=False)
+            info = await sandbox.fs.get_file_info(path, request_timeout=30)
+            if info.is_dir or info.size > TRANSFER_LIMIT:
+                raise ComputerUnavailable("Downloads support files up to 25 MB.")
+            # The SDK's download_file takes positional arguments only: (path, timeout_seconds).
+            return await sandbox.fs.download_file(path, 120)
+
+    async def upload(self, name: str, content: bytes) -> str:
+        """Put a person's file in the agent's uploads folder; returns its path on the computer."""
+        name = re.sub(r"[^A-Za-z0-9._ -]", "_", name.replace("\\", "/").rsplit("/", 1)[-1]).strip(" .")[:120]
+        if not name or len(content) > TRANSFER_LIMIT:
+            raise ComputerUnavailable("Upload a named file of up to 25 MB.")
+        async with self.lock:
+            sandbox = await self.ensure(create=False)
+            try:
+                await sandbox.fs.create_folder("uploads", "755", request_timeout=30)
+            except DaytonaError:
+                pass  # Usually it already exists; the upload below reports any real problem.
+            await sandbox.fs.upload_file(content, f"uploads/{name}", timeout=120)
+            # Relative paths resolve from the working directory; report an absolute path for the agent.
+            work_dir = (await sandbox.get_work_dir() or "").rstrip("/")
+            return f"{work_dir}/uploads/{name}" if work_dir else f"uploads/{name}"
+
+    async def detach(self) -> None:
+        """Release this connection without stopping the computer (people may still be viewing it)."""
+        if self.client is not None:
+            try:
+                await self.client.close()
+            except Exception:
+                logger.warning("Could not close Daytona client for computer %s", self.key)
+        self.client = None
+        self.sandbox = None
+        self.desktop_started = False
 
     async def close(self) -> None:
         # Also recover an allocation made just before a worker crash, even if the graph
