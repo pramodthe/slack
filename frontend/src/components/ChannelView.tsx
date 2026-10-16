@@ -138,22 +138,41 @@ export default function ChannelView({
   ];
   const agentCount = channel.agent_ids.length;
   const humanCount = channel.human_ids.length;
+  const dmAgent = channel.dm_agent_id != null ? state.agents[channel.dm_agent_id] : null;
 
   return (
     <section className="channel">
       <header className="channel-header">
-        <div>
-          <div className="channel-title"># {channel.name}</div>
-          {channel.topic && <div className="channel-topic">{channel.topic}</div>}
-        </div>
+        {dmAgent ? (
+          <div className="dm-title">
+            <Avatar name={dmAgent.name} kind="agent" role={dmAgent.role} />
+            <div>
+              <div className="channel-title">{dmAgent.name}</div>
+              <div className="channel-topic">
+                {dmAgent.role_label} · {dmAgent.status.state} · only you can see this conversation
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="channel-title"># {channel.name}</div>
+            {channel.topic && <div className="channel-topic">{channel.topic}</div>}
+          </div>
+        )}
         <div className="channel-actions">
           <label className="toggle" title="Show messages agents send to each other">
             <input type="checkbox" checked={showChatter} onChange={(e) => setShowChatter(e.target.checked)} />
             Agent chatter
           </label>
-          <button className={`chip ${showMembers ? "active" : ""}`} onClick={onToggleMembers}>
-            👤 {humanCount} · 🤖 {agentCount}
-          </button>
+          {dmAgent ? (
+            <button className="chip" onClick={() => openModal({ kind: "agent", agentId: dmAgent.id })}>
+              ⚙ Settings
+            </button>
+          ) : (
+            <button className={`chip ${showMembers ? "active" : ""}`} onClick={onToggleMembers}>
+              👤 {humanCount} · 🤖 {agentCount}
+            </button>
+          )}
         </div>
       </header>
 
@@ -161,11 +180,24 @@ export default function ChannelView({
         {!messages && <div className="muted center">Loading messages…</div>}
         {messages && messages.length === 0 && (
           <div className="channel-intro">
-            <h2># {channel.name}</h2>
-            <p>
-              This is the start of <strong>#{channel.name}</strong>. Ask <span className="mention">@Master</span> for
-              something and it delegates to specialist helpers, or add visible teammates from the members panel.
-            </p>
+            {dmAgent ? (
+              <>
+                <h2>{dmAgent.name}</h2>
+                <p>
+                  This is your private conversation with <strong>{dmAgent.name}</strong> ({dmAgent.role_label}). Every
+                  message goes straight to {dmAgent.name}, so no @mention is needed.
+                </p>
+              </>
+            ) : (
+              <>
+                <h2># {channel.name}</h2>
+                <p>
+                  This is the start of <strong>#{channel.name}</strong>. Ask <span className="mention">@Master</span>{" "}
+                  for something and it delegates to specialist helpers, or add visible teammates from the members
+                  panel.
+                </p>
+              </>
+            )}
           </div>
         )}
         <MentionNames names={mentionNames}>{rows}</MentionNames>

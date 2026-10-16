@@ -41,7 +41,7 @@ export default function Workspace({
               onToggleMembers={() => setShowMembers((v) => !v)}
               openModal={setModal}
             />
-            {showMembers && <MembersPanel state={state} channel={channel} openModal={setModal} />}
+            {showMembers && !channel.is_dm && <MembersPanel state={state} channel={channel} openModal={setModal} />}
           </div>
         ) : (
           <div className="empty">Pick or create a channel to get started.</div>
@@ -57,7 +57,7 @@ export default function Workspace({
         />
       )}
       {modal?.kind === "new-agent" && (
-        <CreateAgentModal state={state} channel={channel} onClose={() => setModal(null)} />
+        <CreateAgentModal state={state} channel={channel?.is_dm ? null : channel} onClose={() => setModal(null)} />
       )}
       {modal?.kind === "agent" && state.agents[modal.agentId] && (
         <AgentModal state={state} agent={state.agents[modal.agentId]} onClose={() => setModal(null)} />

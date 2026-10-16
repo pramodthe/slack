@@ -25,7 +25,7 @@ export type Action =
 const byId = <T extends { id: number }>(items: T[]) => Object.fromEntries(items.map((i) => [i.id, i]));
 
 export function initialState(boot: Bootstrap): State {
-  const general = boot.channels.find((c) => c.name === "general") ?? boot.channels[0];
+  const general = boot.channels.find((c) => c.name === "general") ?? boot.channels.find((c) => !c.is_dm);
   return {
     me: boot.me,
     users: byId(boot.users),
@@ -77,7 +77,16 @@ function applyEvent(state: State, event: ServerEvent): State {
     case "agent_deleted": {
       const agents = { ...state.agents };
       delete agents[event.agent_id];
-      return { ...state, agents };
+      const channels = Object.fromEntries(
+        Object.values(state.channels)
+          .filter((c) => !c.is_dm || (c.dm_agent_id !== null && c.dm_agent_id !== event.agent_id))
+          .map((c) => [c.id, c]),
+      );
+      const activeChannelId =
+        state.activeChannelId != null && !channels[state.activeChannelId]
+          ? (Object.values(channels).find((c) => c.name === "general")?.id ?? null)
+          : state.activeChannelId;
+      return { ...state, agents, channels, activeChannelId };
     }
     case "agent_status": {
       const agent = state.agents[event.agent_id];

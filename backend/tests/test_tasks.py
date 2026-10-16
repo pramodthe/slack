@@ -13,7 +13,7 @@ from app.agent_tools import tools_for
 from app.auth import encrypt_secret, issue_token
 from app.harness import build_harness
 from app.main import app
-from app.models import AgentProfile, AgentTask, Channel, ChannelMember, Message, User, db, init_db
+from app.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
 from app.tasks import enqueue, recover_tasks, update_task
 from app.worker import complete, execute, process
 
@@ -375,6 +375,20 @@ def test_handoff_is_idempotent_validated_and_bounded(job):
         assert hand_off(task, teammate=writer.name, request="More", report_back=True, call_id=f"n{n}")["status"]
     assert "already used" in hand_off(task, teammate=writer.name, request="More", report_back=True,
                                       call_id="over")["error"]
+
+
+def test_handoff_is_refused_in_a_direct_message(job):
+    from app.tasks import hand_off
+    task, _, user = job
+    writer = teammate()
+    with db() as session:
+        session.add(DirectMessage(channel_id=task.channel_id, user_id=user.id, agent_id=task.agent_id))
+        session.commit()
+    assert "one-on-one" in hand_off(task, teammate=writer.name, request="Draft it", report_back=True,
+                                    call_id="dm")["error"]
+    with db() as session:
+        assert session.get(ChannelMember, (task.channel_id, "agent", writer.id)) is None
+        assert not session.exec(select(AgentTask).where(AgentTask.agent_id == writer.id)).all()
 
 
 def test_handoff_without_report_back_answers_humans(job):

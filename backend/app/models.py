@@ -30,6 +30,14 @@ class Channel(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class DirectMessage(SQLModel, table=True):
+    """Marks a channel as one person's private conversation with one agent."""
+    channel_id: int = Field(foreign_key="channel.id", primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    # Cleared when the agent is deleted: SQLite can reuse its row id for a future agent.
+    agent_id: int | None = Field(default=None, index=True)
+
+
 class ChannelMember(SQLModel, table=True):
     channel_id: int = Field(foreign_key="channel.id", primary_key=True)
     member_type: str = Field(primary_key=True)  # "human" | "agent"
@@ -176,6 +184,13 @@ def init_db() -> None:
 
 def db() -> Session:
     return Session(engine, expire_on_commit=False)
+
+
+def dm_owner(channel_id: int) -> int | None:
+    """The user who owns this direct-message channel, or None for a shared channel."""
+    with db() as session:
+        dm = session.get(DirectMessage, channel_id)
+        return dm.user_id if dm else None
 
 
 def get_session():

@@ -8,7 +8,8 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from app.models import AgentProfile, AgentTask, ChannelMember, Message, TaskApproval, TaskHandoff, db, utcnow
+from app.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, TaskApproval, TaskHandoff, db,
+                        utcnow)
 
 # Teammate hand-offs allowed per original request; each also yields at most one report back.
 MAX_HANDOFFS = 6
@@ -110,6 +111,9 @@ def hand_off(task: AgentTask, *, teammate: str, request: str, report_back: bool,
     if not request or len(request) > 8000:
         return {"error": "Provide a request of 1-8000 characters."}
     with db() as session:
+        if session.get(DirectMessage, task.channel_id):
+            return {"error": "This is a private one-on-one conversation, so teammates can't join it. "
+                             "Use internal helpers, or suggest the person ask the teammate in a shared channel."}
         sender = session.get(AgentProfile, task.agent_id)
         others = [a for a in session.exec(select(AgentProfile)).all() if a.id != task.agent_id]
         wanted = teammate.strip().lstrip("@").lower()

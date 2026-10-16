@@ -19,7 +19,7 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const dirty = role !== agent.role || model !== agent.model || instructions !== agent.instructions;
-  const channels = Object.values(state.channels).filter((c) => c.agent_ids.includes(agent.id));
+  const channels = Object.values(state.channels).filter((c) => !c.is_dm && c.agent_ids.includes(agent.id));
   const creator = agent.created_by_agent
     ? state.agents[agent.created_by_agent]?.name
     : agent.created_by
