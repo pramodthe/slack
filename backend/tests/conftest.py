@@ -4,5 +4,5 @@ from pathlib import Path
 
 _db = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_db.as_posix()}"
-for key in ("BAND_USER_API_KEY", "ANTHROPIC_API_KEY"):
+for key in ("BAND_USER_API_KEY", "ANTHROPIC_API_KEY", "DAYTONA_API_KEY", "EXA_API_KEY"):
     os.environ[key] = ""

@@ -3,19 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from uuid import uuid4
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
-from band.runtime.custom_tools import CustomToolDef
-from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.agent_runner import AgentManager, current_room, describe_error, fetch_identity
+from app.agent_runner import AgentManager, describe_error, fetch_identity
 from app.auth import encrypt_secret
 from app.band_org import BandOrg
 from app.config import settings
 from app.events import bus
-from app.models import AgentProfile, Channel, ChannelMember, Message, User, db
+from app.models import AgentTask, AgentProfile, Channel, ChannelMember, Message, User, db
 from app.roles import MASTER_ROLE, ROLES, role_label
 
 logger = logging.getLogger(__name__)
@@ -58,19 +57,6 @@ def _mentioned(content: str, *names: str) -> bool:
     )
 
 
-# The SDK names a custom tool after its input class: "Create_AgentInput" -> "create_agent".
-class Create_AgentInput(BaseModel):
-    """Create a new specialist AI agent on Band and add it to this room. Returns its handle so you can @mention it."""
-
-    name: str = Field(min_length=3, max_length=40, description="Short display name, e.g. 'Market Researcher'")
-    role: Literal["researcher", "writer", "coder", "critic", "coordinator", "custom"]
-    instructions: str = Field(default="", max_length=4000, description="Focused instructions for this agent")
-
-
-class List_AgentsInput(BaseModel):
-    """List every agent in this workspace with its role, handle and whether it is already in this room."""
-
-
 class AppService:
     """Keeps the app's channels, agents and messages in step with the org's Band account."""
 
@@ -80,10 +66,14 @@ class AppService:
         self._room_to_channel: dict[str, int] = {}
         self._poll_since: dict[str, datetime] = {}
         self._poller: asyncio.Task | None = None
+        self._task_poller: asyncio.Task | None = None
 
     # --- lifecycle ---
 
     async def startup(self) -> None:
+        with db() as session:
+            latest = session.exec(select(Message.id).order_by(Message.id.desc()).limit(1)).first() or 0
+        self._task_poller = asyncio.create_task(self._watch_task_messages(latest), name="task-messages")
         await self.org.connect()
         await self._publish_band_status()
         if not self.org.online:
@@ -103,11 +93,29 @@ class AppService:
         self._poller = asyncio.create_task(self._poll_forever(), name="band-poller")
 
     async def shutdown(self) -> None:
+        if self._task_poller is not None:
+            self._task_poller.cancel()
+            await asyncio.gather(self._task_poller, return_exceptions=True)
         if self._poller is not None:
             self._poller.cancel()
             await asyncio.gather(self._poller, return_exceptions=True)
         await self.agents.stop_all()
         await self.org.close()
+
+    async def _watch_task_messages(self, after_id: int) -> None:
+        """Bridge worker commits into WebSocket updates, including unread channels."""
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                with db() as session:
+                    messages = session.exec(select(Message).join(
+                        AgentTask, AgentTask.reply_message_id == Message.id
+                    ).where(Message.id > after_id).order_by(Message.id)).all()
+                for message in messages:
+                    await bus.publish({"type": "message", "message": serialize_message(message)})
+                    after_id = message.id
+            except Exception:
+                logger.exception("Could not publish worker replies")
 
     def _require_band(self) -> None:
         if not self.org.online:
@@ -265,9 +273,7 @@ class AppService:
         owner = self.org.owner
         await self.agents.start(
             profile,
-            owner_name=owner.name if owner else "the humans",
-            owner_handle=owner.handle if owner else "",
-            tools=self._master_tools(profile) if profile.is_master else None,
+            owner_id=owner.id if owner else "",
         )
 
     async def _register_agent(
@@ -364,65 +370,6 @@ class AppService:
             await self.publish_channel(channel_id)
         await bus.publish({"type": "agent_deleted", "agent_id": profile.id})
 
-    def _master_tools(self, master: AgentProfile) -> list[CustomToolDef]:
-        async def create_agent(args: Create_AgentInput) -> dict[str, Any]:
-            room_id = current_room.get()
-            with db() as session:
-                channel = self._channel_for_room(session, room_id) if room_id else None
-            try:
-                profile = await self.create_agent(
-                    name=args.name,
-                    role=args.role,
-                    instructions=args.instructions,
-                    model=master.model,
-                    channel_id=channel.id if channel else None,
-                    created_by_agent=master.id,
-                )
-            except ServiceError as exc:
-                return {"error": exc.message}
-            if channel and room_id:
-                await self.system_message(
-                    channel.id, f"{master.name} created **{profile.name}** ({role_label(profile.role)})."
-                )
-            return {
-                "name": profile.name,
-                "handle": profile.handle,
-                "id": profile.band_agent_id,
-                "role": profile.role,
-                "in_this_room": channel is not None,
-            }
-
-        async def list_agents(_args: List_AgentsInput) -> list[dict[str, Any]]:
-            room_id = current_room.get()
-            with db() as session:
-                channel = self._channel_for_room(session, room_id) if room_id else None
-                in_room = (
-                    {
-                        m.member_id
-                        for m in session.exec(
-                            select(ChannelMember).where(
-                                ChannelMember.channel_id == channel.id, ChannelMember.member_type == "agent"
-                            )
-                        ).all()
-                    }
-                    if channel
-                    else set()
-                )
-                profiles = session.exec(select(AgentProfile).where(AgentProfile.id != master.id)).all()
-            return [
-                {
-                    "name": p.name,
-                    "handle": p.handle,
-                    "id": p.band_agent_id,
-                    "role": role_label(p.role),
-                    "instructions": p.instructions[:200],
-                    "in_this_room": p.id in in_room,
-                }
-                for p in profiles
-            ]
-
-        return [(Create_AgentInput, create_agent), (List_AgentsInput, list_agents)]
-
     # --- messages ---
 
     async def _store(self, message: Message) -> dict[str, Any] | None:
@@ -464,8 +411,26 @@ class AppService:
             content=content,
             mentions=mentions,
         )
-        payload = await self._store(message)
-        assert payload is not None
+        # Accept the message and its work atomically; Band relay cannot lose an accepted task.
+        with db() as session:
+            channel = session.get(Channel, channel_id)
+            session.add(message)
+            session.flush()
+            for agent in mentioned_agents:
+                room_id = channel.band_room_id or ""
+                session.add(AgentTask(id=uuid4().hex,
+                    source_key=f"{agent.id}:{room_id}:app-message-{message.id}",
+                    channel_id=channel_id, agent_id=agent.id, room_id=room_id,
+                    prompt=f"**{user.display_name}:** {content}",
+                    reply_to=self.org.owner.id if self.org.owner else ""))
+                if not session.get(ChannelMember, (channel_id, "agent", agent.id)):
+                    session.add(ChannelMember(channel_id=channel_id, member_type="agent", member_id=agent.id))
+            session.commit()
+            session.refresh(message)
+            payload = serialize_message(message)
+        await bus.publish({"type": "message", "message": payload})
+        if mentioned_agents:
+            await self.publish_channel(channel_id)
         asyncio.create_task(self._relay(channel_id, message.id, user.display_name, content, mentioned_agents))
         return payload
 
@@ -475,7 +440,7 @@ class AppService:
         """Posts a human's message into the channel's Band room as the org owner."""
         if not self.org.online:
             if mentioned:
-                await self.system_message(channel_id, f"Agents can't be reached: {self.org.error or 'not connected to Band'}.")
+                await self.system_message(channel_id, "Band is offline; your agent task is saved locally.")
             return
         with db() as session:
             channel = session.get(Channel, channel_id)
@@ -491,7 +456,7 @@ class AppService:
         except Exception as exc:
             if mentioned:
                 logger.exception("Relay to Band failed")
-                await self.system_message(channel_id, f"Couldn't deliver the message to Band: {describe_error(exc)}")
+                await self.system_message(channel_id, f"Couldn't sync the message to Band: {describe_error(exc)}. Agent tasks remain saved locally.")
             else:
                 logger.info("Band didn't accept an unmentioned message: %s", describe_error(exc))
             return
@@ -609,6 +574,10 @@ class AppService:
                 continue
             profile = agents_by_band_id.get(item.sender_id)
             if profile is not None:
+                # Managed agents publish their answer locally before the worker sends
+                # the Band copy. Mirroring that copy would race its send receipt.
+                if profile.band_agent_id in self.agents.local_band_ids:
+                    continue
                 refs = re.findall(r"@([\w./-]+)", item.content)
                 await self._store_agent_message(channel_id, profile, item.content, refs, item.id)
                 continue

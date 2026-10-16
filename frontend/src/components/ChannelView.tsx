@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import type { State } from "../store";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Dispatch } from "react";
+import type { State, Action } from "../store";
 import type { Channel, Message } from "../types";
 import Avatar from "./Avatar";
 import Composer from "./Composer";
+import TaskPanel from "./TaskPanel";
 import RichText, { MentionNames } from "./RichText";
 import type { Modal } from "./Workspace";
 
@@ -69,12 +70,14 @@ function MessageRow({
 
 export default function ChannelView({
   state,
+  dispatch,
   channel,
   showMembers,
   onToggleMembers,
   openModal,
 }: {
   state: State;
+  dispatch: Dispatch<Action>;
   channel: Channel;
   showMembers: boolean;
   onToggleMembers: () => void;
@@ -154,7 +157,7 @@ export default function ChannelView({
             <h2># {channel.name}</h2>
             <p>
               This is the start of <strong>#{channel.name}</strong>. Ask <span className="mention">@Master</span> for
-              something and it builds a team of agents for the job, or add agents yourself from the members panel.
+              something and it delegates to specialist helpers, or add visible teammates from the members panel.
             </p>
           </div>
         )}
@@ -165,6 +168,8 @@ export default function ChannelView({
           </button>
         )}
       </div>
+
+      <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} />
 
       <div className="typing-bar">
         {typingNames.length > 0 && (

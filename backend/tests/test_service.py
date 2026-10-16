@@ -8,11 +8,11 @@ import pytest
 from sqlmodel import select
 
 import app.service as service_module
-from app.agent_runner import BandIdentity, current_room
+from app.agent_runner import BandIdentity
 from app.auth import encrypt_secret
 from app.band_org import BandOrg, Owner
 from app.models import AgentProfile, Channel, ChannelMember, Message, User, db, init_db
-from app.service import AppService, Create_AgentInput, List_AgentsInput
+from app.service import AppService
 
 
 class FakeOrg(BandOrg):
@@ -75,43 +75,22 @@ def _user() -> User:
         return user
 
 
-def test_channels_are_band_rooms_and_the_master_creates_agents(svc: AppService):
+def test_channels_are_band_rooms_and_visible_agents_can_be_created(svc: AppService):
     async def scenario():
         await svc._ensure_master()
-        channel = await svc.create_channel("launch", "", _user())
-        room_id = channel["band_room_id"]
+        user = _user()
+        channel = await svc.create_channel("launch", "", user)
         master = svc.master()
-
         assert svc.org.rooms == ["#launch"]
-        assert master.band_agent_id in svc.org.participants[room_id]
+        assert master.band_agent_id in svc.org.participants[channel["band_room_id"]]
         assert channel["agent_ids"] == [master.id]
-
-        create_tool, list_tool = (handler for _, handler in svc._master_tools(master))
-        token = current_room.set(room_id)
-        try:
-            created = await create_tool(Create_AgentInput(name="Scout", role="researcher", instructions="Find facts"))
-            listed = await list_tool(List_AgentsInput())
-        finally:
-            current_room.reset(token)
-        return channel["id"], room_id, master, created, listed
-
-    channel_id, room_id, master, created, listed = asyncio.run(scenario())
-
-    assert created == {
-        "name": "Scout",
-        "handle": "pat/scout",
-        "id": "agent-scout",
-        "role": "researcher",
-        "in_this_room": True,
-    }
-    assert svc.org.registered == ["Master", "Scout"]
-    assert "agent-scout" in svc.org.participants[room_id]
-    assert [(a["name"], a["in_this_room"]) for a in listed] == [("Scout", True)]
-    with db() as session:
-        scout = session.exec(select(AgentProfile).where(AgentProfile.name == "Scout")).one()
-        assert scout.created_by_agent == master.id
-        assert session.get(ChannelMember, (channel_id, "agent", scout.id)) is not None
-    assert _messages(channel_id)[-1].content == "Master created **Scout** (Researcher)."
+        scout = await svc.create_agent(name="Scout", role="researcher", instructions="Find facts",
+                                       model=master.model, channel_id=channel["id"], created_by=user.id)
+        assert svc.org.registered == ["Master", "Scout"]
+        assert scout.band_agent_id in svc.org.participants[channel["band_room_id"]]
+        with db() as session:
+            assert session.get(ChannelMember, (channel["id"], "agent", scout.id)) is not None
+    asyncio.run(scenario())
 
 
 def test_agent_replies_to_the_owner_reach_humans_and_polling_dedupes(svc: AppService):

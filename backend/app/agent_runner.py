@@ -2,26 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from band import Agent
-from band.adapters.anthropic import AnthropicAdapter, AnthropicAdapterConfig
+from band.core.simple_adapter import SimpleAdapter
 from band.client.rest import DEFAULT_REQUEST_OPTIONS, AsyncRestClient, aclose_rest_client
-from band.core.types import Emit
-from band.runtime.custom_tools import CustomToolDef
-from band.runtime.tools.types import BandTool
 
 from app.auth import decrypt_secret
 from app.config import settings
-from app.models import AgentProfile
-from app.roles import build_prompt
+from app.models import AgentProfile, AgentTask, Channel, Message, db
+from sqlmodel import select
+from app.tasks import enqueue
 
 logger = logging.getLogger(__name__)
-
-current_room: ContextVar[str | None] = ContextVar("current_room", default=None)
-
 
 class AgentSink(Protocol):
     async def agent_message(
@@ -51,81 +45,44 @@ def describe_error(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
-def _message_id(result: Any) -> str | None:
-    if isinstance(result, dict):
-        if isinstance(result.get("id"), str):
-            return result["id"]
-        data = result.get("data")
-        if isinstance(data, dict) and isinstance(data.get("id"), str):
-            return data["id"]
-        return None
-    value = getattr(result, "id", None)
-    return value if isinstance(value, str) else None
+class QueuedAgentAdapter(SimpleAdapter):
+    """Acknowledge Band turns after durable enqueue; the worker owns all reasoning."""
 
+    def __init__(self, *, profile_id: int, reply_to: str):
+        super().__init__()
+        self.profile_id = profile_id
+        self.reply_to = reply_to
 
-class _MirroringTools:
-    """Proxies an agent's platform tools and reports every message it sends."""
+    @property
+    def judges_turns(self) -> bool:
+        return False
 
-    def __init__(self, inner: Any, on_sent) -> None:
-        self._inner = inner
-        self._on_sent = on_sent
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    async def execute_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        result = await self._inner.execute_tool_call(tool_name, arguments)
-        if tool_name == BandTool.SEND_MESSAGE:
-            message_id = _message_id(result)
-            if message_id:
-                try:
-                    await self._on_sent(arguments, message_id)
-                except Exception:
-                    logger.exception("Failed to mirror an outgoing agent message")
-        return result
-
-
-class RoleAgentAdapter(AnthropicAdapter):
-    def __init__(self, config: AnthropicAdapterConfig, *, profile_id: int, sink: AgentSink, **features):
-        super().__init__(config, **features)
-        self._profile_id = profile_id
-        self._sink = sink
-
-    async def on_message(
-        self,
-        msg,
-        tools,
-        history,
-        participants_msg,
-        contacts_msg,
-        *,
-        is_session_bootstrap: bool,
-        room_id: str,
-    ) -> None:
-        async def on_sent(arguments: dict[str, Any], message_id: str) -> None:
-            await self._sink.agent_message(
-                self._profile_id,
-                room_id,
-                str(arguments.get("content", "")),
-                [str(m) for m in arguments.get("mentions") or []],
-                message_id,
-            )
-
-        await self._sink.agent_typing(self._profile_id, room_id, True)
-        token = current_room.set(room_id)
-        try:
-            await super().on_message(
-                msg,
-                _MirroringTools(tools, on_sent),
-                history,
-                participants_msg,
-                contacts_msg,
-                is_session_bootstrap=is_session_bootstrap,
-                room_id=room_id,
-            )
-        finally:
-            current_room.reset(token)
-            await self._sink.agent_typing(self._profile_id, room_id, False)
+    async def on_message(self, msg, tools, history, participants_msg, contacts_msg, *,
+                         is_session_bootstrap: bool, room_id: str) -> None:
+        with db() as session:
+            channel = session.exec(select(Channel).where(Channel.band_room_id == room_id)).first()
+        if channel is None:
+            logger.warning("Ignoring agent turn for unknown room %s", room_id)
+            return
+        # App-originated messages already committed their jobs before relay. Keep native
+        # Band mentions while suppressing the transport echo, even if its receipt is racing.
+        if msg.sender_id == self.reply_to:
+            with db() as session:
+                recent = session.exec(select(Message).where(Message.channel_id == channel.id,
+                    Message.author_type == "human").order_by(Message.id.desc()).limit(100)).all()
+                for local in recent:
+                    if local.band_message_id == msg.id or msg.content == f"**{local.author_name}:** {local.content}":
+                        key = f"{self.profile_id}:{room_id}:app-message-{local.id}"
+                        if session.exec(select(AgentTask.id).where(AgentTask.source_key == key)).first():
+                            return
+        # Raw history is kept bounded and treated as untrusted context by the harness.
+        context = "\n".join(
+            f"{getattr(item, 'sender_name', 'participant')}: {getattr(item, 'content', '')}"
+            for item in (history or [])[-30:]
+        )[-24000:]
+        enqueue(agent_id=self.profile_id, channel_id=channel.id, room_id=room_id,
+                source_id=msg.id, prompt=msg.content, context=context,
+                reply_to=self.reply_to or msg.sender_id)
 
 
 @dataclass
@@ -153,31 +110,11 @@ class AgentManager:
         self,
         profile: AgentProfile,
         *,
-        owner_name: str,
-        owner_handle: str,
-        tools: list[CustomToolDef] | None = None,
+        owner_id: str = "",
     ) -> None:
         assert profile.id is not None
         await self.stop(profile.id)
-        config = AnthropicAdapterConfig(
-            model=profile.model,
-            provider_key=settings.anthropic_api_key or None,
-            custom_section=build_prompt(
-                name=profile.name,
-                role=profile.role,
-                instructions=profile.instructions,
-                owner_name=owner_name,
-                owner_handle=owner_handle,
-            ),
-        )
-        adapter = RoleAgentAdapter(
-            config,
-            profile_id=profile.id,
-            sink=self._sink,
-            additional_tools=tools,
-            emit={Emit.TOOL_CALLS},
-            exclude_tools=[BandTool.CREATE_CHATROOM.value],
-        )
+        adapter = QueuedAgentAdapter(profile_id=profile.id, reply_to=owner_id)
         agent = Agent.create(
             adapter=adapter,
             agent_id=profile.band_agent_id,

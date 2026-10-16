@@ -33,6 +33,7 @@ export default function Workspace({
         {channel ? (
           <div className="channel-area">
             <ChannelView
+            dispatch={dispatch}
               key={channel.id}
               state={state}
               channel={channel}

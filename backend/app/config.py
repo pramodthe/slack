@@ -28,6 +28,16 @@ class Settings:
     app_secret: str = _env("APP_SECRET", "dev-secret-change-me")
     database_url: str = _env("DATABASE_URL", f"sqlite:///{(BACKEND_DIR / 'band_slack.db').as_posix()}")
     default_model: str = _env("DEFAULT_MODEL", "claude-sonnet-5-5")
+    checkpoint_path: str = _env("AGENT_CHECKPOINT_PATH", str(BACKEND_DIR / "agent_checkpoints.db"))
+    task_timeout: float = float(_env("AGENT_TASK_TIMEOUT", "900"))
+    task_recursion_limit: int = int(_env("AGENT_RECURSION_LIMIT", "100"))
+    exa_api_key: str = _env("EXA_API_KEY")
+    daytona_api_key: str = _env("DAYTONA_API_KEY")
+    daytona_api_url: str = _env("DAYTONA_API_URL", "https://app.daytona.io/api")
+    daytona_target: str = _env("DAYTONA_TARGET")
+    daytona_snapshot: str = _env("DAYTONA_SNAPSHOT")
+    daytona_auto_stop: int = int(_env("DAYTONA_AUTO_STOP_MINUTES", "15"))
+    daytona_auto_delete: int = int(_env("DAYTONA_AUTO_DELETE_MINUTES", "1440"))
     poll_seconds: float = float(_env("BAND_POLL_SECONDS", "5"))
 
 
