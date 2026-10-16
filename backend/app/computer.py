@@ -178,7 +178,8 @@ class TaskComputer:
             command = (
                 "export DISPLAY=${DISPLAY:-:0}; "
                 "browser=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true); "
-                'if [ -n "$browser" ]; then nohup "$browser" --no-sandbox --no-first-run '
+                # Daytona sandbox networking drops HTTP/3 (QUIC/UDP); Chromium otherwise fails with ERR_QUIC_PROTOCOL_ERROR.
+                'if [ -n "$browser" ]; then nohup "$browser" --no-sandbox --no-first-run --disable-quic '
                 "--disable-dev-shm-usage --user-data-dir=/tmp/band-browser " + shlex.quote(url) +
                 " >/tmp/band-browser.log 2>&1 </dev/null & "
                 "elif command -v firefox >/dev/null; then nohup firefox " + shlex.quote(url) +
