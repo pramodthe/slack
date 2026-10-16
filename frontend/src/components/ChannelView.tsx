@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Dispatch } from "react";
 import type { State, Action } from "../store";
-import type { Channel, Message } from "../types";
+import type { Channel, ChannelComputer, Message } from "../types";
 import Avatar from "./Avatar";
 import Composer from "./Composer";
 import TaskPanel from "./TaskPanel";
 import RichText, { MentionNames } from "./RichText";
-import type { Modal } from "./Workspace";
+import type { Modal, OpenComputer } from "./Workspace";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -75,6 +75,9 @@ export default function ChannelView({
   showMembers,
   onToggleMembers,
   openModal,
+  computers,
+  computerOpen,
+  openComputer,
 }: {
   state: State;
   dispatch: Dispatch<Action>;
@@ -82,6 +85,9 @@ export default function ChannelView({
   showMembers: boolean;
   onToggleMembers: () => void;
   openModal: (m: Modal) => void;
+  computers: ChannelComputer[];
+  computerOpen: boolean;
+  openComputer: OpenComputer;
 }) {
   const [showChatter, setShowChatter] = useState(() => localStorage.getItem("show-chatter") !== "0");
   const scroller = useRef<HTMLDivElement>(null);
@@ -138,22 +144,51 @@ export default function ChannelView({
   ];
   const agentCount = channel.agent_ids.length;
   const humanCount = channel.human_ids.length;
+  const dmAgent = channel.dm_agent_id != null ? state.agents[channel.dm_agent_id] : null;
+  const headerComputer = computers.find((c) => c.agent_working) ?? computers[0];
 
   return (
     <section className="channel">
       <header className="channel-header">
-        <div>
-          <div className="channel-title"># {channel.name}</div>
-          {channel.topic && <div className="channel-topic">{channel.topic}</div>}
-        </div>
+        {dmAgent ? (
+          <div className="dm-title">
+            <Avatar name={dmAgent.name} kind="agent" role={dmAgent.role} />
+            <div>
+              <div className="channel-title">{dmAgent.name}</div>
+              <div className="channel-topic">
+                {dmAgent.role_label} · {dmAgent.status.state} · only you can see this conversation
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="channel-title"># {channel.name}</div>
+            {channel.topic && <div className="channel-topic">{channel.topic}</div>}
+          </div>
+        )}
         <div className="channel-actions">
           <label className="toggle" title="Show messages agents send to each other">
             <input type="checkbox" checked={showChatter} onChange={(e) => setShowChatter(e.target.checked)} />
             Agent chatter
           </label>
-          <button className={`chip ${showMembers ? "active" : ""}`} onClick={onToggleMembers}>
-            👤 {humanCount} · 🤖 {agentCount}
-          </button>
+          {headerComputer && !computerOpen && (
+            <button
+              className={`chip ${headerComputer.agent_working ? "computer-chip-live" : ""}`}
+              title="Show the agent's computer"
+              onClick={() => openComputer(headerComputer.agent_id, headerComputer.task_id)}
+            >
+              🖥 Computer{headerComputer.agent_working ? " · live" : ""}
+            </button>
+          )}
+          {dmAgent ? (
+            <button className="chip" onClick={() => openModal({ kind: "agent", agentId: dmAgent.id })}>
+              ⚙ Settings
+            </button>
+          ) : (
+            <button className={`chip ${showMembers ? "active" : ""}`} onClick={onToggleMembers}>
+              👤 {humanCount} · 🤖 {agentCount}
+            </button>
+          )}
         </div>
       </header>
 
@@ -161,11 +196,24 @@ export default function ChannelView({
         {!messages && <div className="muted center">Loading messages…</div>}
         {messages && messages.length === 0 && (
           <div className="channel-intro">
-            <h2># {channel.name}</h2>
-            <p>
-              This is the start of <strong>#{channel.name}</strong>. Ask <span className="mention">@Master</span> for
-              something and it delegates to specialist helpers, or add visible teammates from the members panel.
-            </p>
+            {dmAgent ? (
+              <>
+                <h2>{dmAgent.name}</h2>
+                <p>
+                  This is your private conversation with <strong>{dmAgent.name}</strong> ({dmAgent.role_label}). Every
+                  message goes straight to {dmAgent.name}, so no @mention is needed.
+                </p>
+              </>
+            ) : (
+              <>
+                <h2># {channel.name}</h2>
+                <p>
+                  This is the start of <strong>#{channel.name}</strong>. Ask <span className="mention">@Master</span>{" "}
+                  for something and it delegates to specialist helpers, or add visible teammates from the members
+                  panel.
+                </p>
+              </>
+            )}
           </div>
         )}
         <MentionNames names={mentionNames}>{rows}</MentionNames>
@@ -176,7 +224,7 @@ export default function ChannelView({
         )}
       </div>
 
-      <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} />
+      <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} openComputer={openComputer} />
 
       <div className="typing-bar">
         {working.length > 0 && (

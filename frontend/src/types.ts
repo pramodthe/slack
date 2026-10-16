@@ -12,6 +12,17 @@ export interface Channel {
   band_room_id: string | null;
   human_ids: number[];
   agent_ids: number[];
+  is_dm: boolean;
+  dm_agent_id: number | null;
+}
+
+export interface ChannelComputer {
+  agent_id: number;
+  task_id: string;
+  status: string;
+  last_action: string;
+  updated_at: string;
+  agent_working: boolean;
 }
 
 export interface AgentStatus {

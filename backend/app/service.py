@@ -14,12 +14,14 @@ from app.auth import encrypt_secret
 from app.band_org import BandOrg
 from app.config import settings
 from app.events import bus
-from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, Message, Schedule, TaskSandbox,
-                        User, db)
+from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message, Schedule,
+                        TaskSandbox, User, db, dm_owner)
 from app.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context
 
 logger = logging.getLogger(__name__)
+
+bus.audience = dm_owner
 
 
 class ServiceError(Exception):
@@ -69,6 +71,7 @@ class AppService:
         self._poll_since: dict[str, datetime] = {}
         self._poller: asyncio.Task | None = None
         self._task_poller: asyncio.Task | None = None
+        self._dm_lock = asyncio.Lock()
 
     # --- lifecycle ---
 
@@ -154,7 +157,8 @@ class AppService:
     async def _ensure_master(self) -> None:
         with db() as session:
             master = session.exec(select(AgentProfile).where(AgentProfile.is_master == True)).first()  # noqa: E712
-            channel_ids = [c.id for c in session.exec(select(Channel)).all()]
+            private = set(session.exec(select(DirectMessage.channel_id)).all())
+            channel_ids = [c.id for c in session.exec(select(Channel)).all() if c.id not in private]
         if master is None:
             master = await self._register_agent(
                 name=settings.master_agent_name,
@@ -194,6 +198,7 @@ class AppService:
         members = session.exec(
             select(ChannelMember).where(ChannelMember.channel_id == channel.id)
         ).all()
+        dm = session.get(DirectMessage, channel.id)
         return {
             "id": channel.id,
             "name": channel.name,
@@ -201,6 +206,8 @@ class AppService:
             "band_room_id": channel.band_room_id,
             "human_ids": [m.member_id for m in members if m.member_type == "human"],
             "agent_ids": [m.member_id for m in members if m.member_type == "agent"],
+            "is_dm": dm is not None,
+            "dm_agent_id": dm.agent_id if dm else None,
         }
 
     async def publish_channel(self, channel_id: int) -> None:
@@ -245,6 +252,33 @@ class AppService:
         if master:
             await self.add_agent_to_channel(channel_id, master, publish=False)
         await self.publish_channel(channel_id)
+        with db() as session:
+            return self.serialize_channel(session, session.get(Channel, channel_id))
+
+    async def open_dm(self, user: User, profile: AgentProfile) -> dict[str, Any]:
+        """The user's private channel with this agent, created with its own Band room on first use."""
+        async with self._dm_lock:
+            with db() as session:
+                existing = session.exec(select(DirectMessage).where(
+                    DirectMessage.user_id == user.id, DirectMessage.agent_id == profile.id)).first()
+                if existing:
+                    return self.serialize_channel(session, session.get(Channel, existing.channel_id))
+            self._require_band()
+            try:
+                room_id = await self.org.create_room(f"{user.display_name} + {profile.name}")
+            except Exception as exc:
+                raise ServiceError(f"Band couldn't create the room: {describe_error(exc)}", 502) from exc
+            with db() as session:
+                channel = Channel(name=f"dm-{uuid4().hex[:12]}", topic=f"Direct messages with {profile.name}",
+                                  band_room_id=room_id, created_by=user.id)
+                session.add(channel)
+                session.flush()
+                session.add_all([DirectMessage(channel_id=channel.id, user_id=user.id, agent_id=profile.id),
+                                 ChannelMember(channel_id=channel.id, member_type="human", member_id=user.id)])
+                session.commit()
+                channel_id = channel.id
+            self._room_to_channel[room_id] = channel_id
+        await self.add_agent_to_channel(channel_id, profile)
         with db() as session:
             return self.serialize_channel(session, session.get(Channel, channel_id))
 
@@ -383,6 +417,9 @@ class AppService:
             for record in session.exec(select(TaskSandbox).where(
                     TaskSandbox.task_id.startswith(f"agent-{profile.band_agent_id}-"))).all():
                 session.delete(record)  # The cloud computer itself auto-stops and auto-deletes.
+            for dm in session.exec(select(DirectMessage).where(DirectMessage.agent_id == profile.id)).all():
+                dm.agent_id = None
+                session.add(dm)
             session.delete(session.get(AgentProfile, profile.id))
             session.commit()
             rooms = [c.band_room_id for c in session.exec(select(Channel)).all() if c.band_room_id]
@@ -422,7 +459,13 @@ class AppService:
         with db() as session:
             agents = session.exec(select(AgentProfile)).all()
             users = session.exec(select(User)).all()
-        mentioned_agents = [a for a in agents if _mentioned(content, a.name, a.handle)]
+            dm = session.get(DirectMessage, channel_id)
+        if dm:
+            # A direct message stays one-on-one: everything goes to its agent, mentioned or not.
+            mentioned_agents = [a for a in agents if a.id == dm.agent_id]
+            users = []
+        else:
+            mentioned_agents = [a for a in agents if _mentioned(content, a.name, a.handle)]
         mentions: list[dict[str, Any]] = [
             {"type": "agent", "id": a.id, "name": a.name} for a in mentioned_agents
         ] + [

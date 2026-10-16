@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi.testclient import TestClient
 
+from app.auth import encrypt_secret
+from app.events import EventBus
 from app.main import app
+from app.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, db
 
 
 def _signup(client: TestClient, username: str, name: str) -> dict:
@@ -59,3 +63,72 @@ def test_humans_chat_while_band_is_not_configured():
 
         assert client.get("/api/bootstrap").status_code == 401
         time.sleep(0.1)
+
+
+def test_direct_messages_are_visible_only_to_their_owner():
+    with TestClient(app) as client:
+        dana = _signup(client, "dana", "Dana")
+        eli = _signup(client, "eli", "Eli")
+        auth_d = {"Authorization": f"Bearer {dana['token']}"}
+        auth_e = {"Authorization": f"Bearer {eli['token']}"}
+        with db() as session:
+            agent = AgentProfile(name="Quill", handle="pat/quill", band_agent_id="agent-quill",
+                                 band_api_key_enc=encrypt_secret("k"))
+            channel = Channel(name="dm-test-dana", topic="Direct messages with Quill")
+            session.add_all([agent, channel])
+            session.flush()
+            session.add_all([
+                DirectMessage(channel_id=channel.id, user_id=dana["user"]["id"], agent_id=agent.id),
+                ChannelMember(channel_id=channel.id, member_type="human", member_id=dana["user"]["id"]),
+                ChannelMember(channel_id=channel.id, member_type="agent", member_id=agent.id),
+                AgentTask(id="dm-task", source_key="dm-task", channel_id=channel.id, agent_id=agent.id,
+                          room_id="", prompt="hi"),
+            ])
+            session.commit()
+            channel_id, agent_id = channel.id, agent.id
+
+        assert client.post(f"/api/agents/{agent_id}/dm", headers=auth_d).json()["id"] == channel_id
+        assert client.post(f"/api/agents/{agent_id}/dm", headers=auth_e).status_code == 503
+
+        mine = next(c for c in client.get("/api/bootstrap", headers=auth_d).json()["channels"] if c["id"] == channel_id)
+        assert mine["is_dm"] and mine["dm_agent_id"] == agent_id
+        assert client.get(f"/api/channels/{channel_id}/messages", headers=auth_d).status_code == 200
+        assert client.post(f"/api/channels/{channel_id}/leave", headers=auth_d).status_code == 409
+        assert client.delete(f"/api/channels/{channel_id}/agents/{agent_id}", headers=auth_d).status_code == 409
+        assert client.get("/api/tasks/dm-task", headers=auth_d).status_code == 200
+
+        assert channel_id not in {c["id"] for c in client.get("/api/bootstrap", headers=auth_e).json()["channels"]}
+        assert client.get(f"/api/channels/{channel_id}/messages", headers=auth_e).status_code == 404
+        assert client.post(f"/api/channels/{channel_id}/messages", json={"content": "hi"},
+                           headers=auth_e).status_code == 404
+        assert client.post(f"/api/channels/{channel_id}/join", headers=auth_e).status_code == 404
+        assert client.get("/api/tasks/dm-task", headers=auth_e).status_code == 404
+
+
+class _Socket:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def send_json(self, event: dict) -> None:
+        self.events.append(event)
+
+
+def test_private_channel_events_reach_only_their_owner():
+    bus = EventBus()
+    bus.audience = lambda channel_id: 1 if channel_id == 7 else None
+    owner, other = _Socket(), _Socket()
+
+    async def scenario():
+        await bus.connect(1, owner)
+        await bus.connect(2, other)
+        owner.events.clear()
+        other.events.clear()
+        await bus.publish({"type": "message", "message": {"channel_id": 7}})
+        await bus.publish({"type": "typing", "channel_id": 7})
+        await bus.publish({"type": "task_activity", "task": {"channel_id": 7}})
+        await bus.publish({"type": "channel", "channel": {"id": 7}})
+        await bus.publish({"type": "message", "message": {"channel_id": 3}})
+    asyncio.run(scenario())
+
+    assert len(owner.events) == 5
+    assert other.events == [{"type": "message", "message": {"channel_id": 3}}]

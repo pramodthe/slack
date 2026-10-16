@@ -1,5 +1,7 @@
-import type { Dispatch } from "react";
+import { useState, type Dispatch } from "react";
+import { api } from "../api";
 import type { Action, State } from "../store";
+import type { Agent, Channel } from "../types";
 import type { Modal } from "./Workspace";
 
 function StatusDot({ state }: { state: string }) {
@@ -17,8 +19,36 @@ export default function Sidebar({
   openModal: (m: Modal) => void;
   onSignOut: () => void;
 }) {
-  const channels = Object.values(state.channels).sort((a, b) => a.name.localeCompare(b.name));
+  const [opening, setOpening] = useState<number | null>(null);
+  const [dmError, setDmError] = useState("");
+  const channels = Object.values(state.channels)
+    .filter((c) => !c.is_dm)
+    .sort((a, b) => a.name.localeCompare(b.name));
   const agents = Object.values(state.agents).sort((a, b) => a.name.localeCompare(b.name));
+  const dms = Object.fromEntries(
+    Object.values(state.channels)
+      .filter((c) => c.is_dm && c.dm_agent_id !== null)
+      .map((c) => [c.dm_agent_id, c]),
+  ) as Record<number, Channel>;
+
+  const openDm = async (agent: Agent) => {
+    setDmError("");
+    const existing = dms[agent.id];
+    if (existing) {
+      dispatch({ type: "select_channel", channelId: existing.id });
+      return;
+    }
+    setOpening(agent.id);
+    try {
+      const channel = await api<Channel>("POST", `/api/agents/${agent.id}/dm`);
+      dispatch({ type: "event", event: { type: "channel", channel } });
+      dispatch({ type: "select_channel", channelId: channel.id });
+    } catch (err) {
+      setDmError(`Couldn't open a chat with ${agent.name}: ${(err as Error).message}`);
+    } finally {
+      setOpening(null);
+    }
+  };
   const people = Object.values(state.users).sort(
     (a, b) => Number(b.online) - Number(a.online) || a.display_name.localeCompare(b.display_name),
   );
@@ -63,12 +93,33 @@ export default function Sidebar({
               +
             </button>
           </div>
-          {agents.map((a) => (
-            <button key={a.id} className="nav-item" onClick={() => openModal({ kind: "agent", agentId: a.id })}>
-              <StatusDot state={a.status.state} /> {a.name}
-              <span className={`role-tag ${a.is_master ? "master" : ""}`}>{a.role_label}</span>
-            </button>
-          ))}
+          {agents.map((a) => {
+            const dm = dms[a.id];
+            const unread = dm ? (state.unread[dm.id] ?? 0) : 0;
+            return (
+              <div key={a.id} className="agent-row">
+                <button
+                  className={`nav-item ${dm && dm.id === state.activeChannelId ? "active" : ""} ${unread ? "unread" : ""}`}
+                  title={`Chat privately with ${a.name}`}
+                  disabled={opening === a.id}
+                  onClick={() => openDm(a)}
+                >
+                  <StatusDot state={a.status.state} /> {a.name}
+                  <span className={`role-tag ${a.is_master ? "master" : ""}`}>{a.role_label}</span>
+                  {unread > 0 && <span className="badge">{unread}</span>}
+                </button>
+                <button
+                  className="icon-btn agent-settings"
+                  title={`${a.name} settings`}
+                  aria-label={`${a.name} settings`}
+                  onClick={() => openModal({ kind: "agent", agentId: a.id })}
+                >
+                  ⚙
+                </button>
+              </div>
+            );
+          })}
+          {dmError && <div className="error small sidebar-error">{dmError}</div>}
           {agents.length === 0 && (
             <button className="nav-item add" onClick={() => openModal({ kind: "new-agent" })}>
               + Add your first agent

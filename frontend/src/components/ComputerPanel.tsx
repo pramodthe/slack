@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, getToken } from "../api";
-import ModalShell from "./ModalShell";
+import type { Agent } from "../types";
+import Avatar from "./Avatar";
 
 interface Control {
   user_name: string;
@@ -35,7 +36,7 @@ interface FileEntry {
   size: number;
 }
 
-type Tab = "live" | "screen" | "files";
+type Tab = "screen" | "live" | "files";
 
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
@@ -55,9 +56,17 @@ async function raw(method: string, path: string, body?: Blob): Promise<Response>
   return response;
 }
 
-export default function ComputerPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
+export default function ComputerPanel({ taskId, agent, working, others, onSwitch, onClose }: {
+  taskId: string;
+  agent: Agent | undefined;
+  working: boolean;
+  others: { agent: Agent; working: boolean }[];
+  onSwitch: (agentId: number) => void;
+  onClose: () => void;
+}) {
   const base = `/api/tasks/${taskId}/computer`;
-  const [tab, setTab] = useState<Tab>("live");
+  const name = agent?.name ?? "Agent";
+  const [tab, setTab] = useState<Tab>("screen");
   const [computer, setComputer] = useState<ComputerState | null>(null);
   const [live, setLive] = useState<LiveView | null>(null);
   const [files, setFiles] = useState<FileEntry[] | null>(null);
@@ -75,12 +84,12 @@ export default function ComputerPanel({ taskId, onClose }: { taskId: string; onC
       } catch (err) {
         if (!stopped) setError((err as Error).message);
       } finally {
-        if (!stopped) timer = window.setTimeout(poll, 2500);
+        if (!stopped) timer = window.setTimeout(poll, working ? 1500 : 4000);
       }
     };
     void poll();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [base]);
+  }, [base, working]);
 
   const run = async (label: string, work: () => Promise<void>) => {
     setBusy(label);
@@ -91,6 +100,7 @@ export default function ComputerPanel({ taskId, onClose }: { taskId: string; onC
 
   const openLive = (control: boolean) => run(control ? "control" : "live", async () => {
     setLive(await api<LiveView>("POST", `${base}/live`, { control }));
+    setTab("live");
   });
 
   const handBack = () => run("release", async () => {
@@ -123,29 +133,58 @@ export default function ComputerPanel({ taskId, onClose }: { taskId: string; onC
     await browse(path);
   });
 
+  const selectTab = (next: Tab) => {
+    setTab(next);
+    if (next === "files" && files === null) void browse("");
+    // Connecting to a computer that is already up costs nothing; a stopped one waits for an explicit click.
+    if (next === "live" && !live && computer?.status === "running") void openLive(false);
+  };
+
   const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) || "/" : "";
   const control = live?.control ?? computer?.control ?? null;
   const viewOnly = !control?.mine;
   const liveSrc = live && `${live.url}?autoconnect=true&resize=scale&reconnect=true&view_only=${viewOnly}`;
+  const status = computer?.status.replaceAll("_", " ") ?? "loading";
+  const dot = computer?.status === "running" ? "online" : computer?.error ? "error" : "stopped";
 
   return (
-    <ModalShell title="Agent computer" onClose={onClose} wide>
-      <div className="computer-panel">
-        <div className="computer-tabs" role="tablist">
-          {(["live", "screen", "files"] as Tab[]).map((name) => (
-            <button key={name} role="tab" aria-selected={tab === name} className={`chip ${tab === name ? "active" : ""}`}
-              onClick={() => { setTab(name); if (name === "files" && files === null) void browse(""); }}>
-              {name === "live" ? "Live" : name === "screen" ? "Latest screenshot" : "Files"}
+    <aside className="computer-sidebar" aria-label={`${name}'s computer`}>
+      <header className="computer-head">
+        <Avatar name={name} kind="agent" role={agent?.role} size={28} />
+        <div className="computer-head-text">
+          <div className="computer-title">{name}'s computer</div>
+          <div className="computer-sub">
+            <span className={`dot dot-${dot}`} /> <span className="computer-status">{status}</span>
+            {working && <span className="live-pill">● Working</span>}
+          </div>
+        </div>
+        <button className="icon-btn subtle" title="Close computer" aria-label="Close computer" onClick={onClose}>×</button>
+      </header>
+
+      {others.length > 0 && (
+        <div className="computer-agents">
+          <span className="muted small">Also in this channel:</span>
+          {others.map((o) => (
+            <button key={o.agent.id} className="chip" onClick={() => onSwitch(o.agent.id)}>
+              {o.agent.name}{o.working ? " ●" : ""}
             </button>
           ))}
-          <button className="chip" disabled={busy === "stop"} onClick={() => void stop()}>Stop computer</button>
         </div>
-        {error && <p role="alert">{error}</p>}
-        {computer && !computer.configured && <p>Computer access is not configured for this workspace.</p>}
-        {computer && (
-          <p className="computer-status">Daytona · {computer.status.replaceAll("_", " ")}
-            {computer.last_action && ` · ${computer.last_action}`}</p>
-        )}
+      )}
+
+      <div className="computer-tabs" role="tablist">
+        {(["screen", "live", "files"] as Tab[]).map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={`chip ${tab === t ? "active" : ""}`}
+            onClick={() => selectTab(t)}>
+            {t === "screen" ? "Screen" : t === "live" ? "Live desktop" : "Files"}
+          </button>
+        ))}
+      </div>
+
+      <div className="computer-body">
+        {error && <p className="error small" role="alert">{error}</p>}
+        {computer && !computer.configured && <p className="muted">Computer access is not configured for this workspace.</p>}
+        {computer?.error && <p className="error small">{computer.error}</p>}
         {control && (
           <p className="computer-control">
             {control.mine ? "You control" : `${control.user_name} controls`} this computer until {time(control.until)}.
@@ -153,36 +192,52 @@ export default function ComputerPanel({ taskId, onClose }: { taskId: string; onC
           </p>
         )}
 
+        {tab === "screen" && (computer?.image ? <>
+          <div className="computer-frame">
+            <img className="computer-screen" src={computer.image} alt={`${name}'s screen`} />
+            {computer.last_action && <div className="computer-caption">{computer.last_action}</div>}
+          </div>
+          <p className="muted small">
+            {working ? "Updates as the agent works" : "Last screen the agent saw"}
+            {computer.updated_at && ` · ${new Date(computer.updated_at).toLocaleTimeString()}`}
+          </p>
+        </> : (
+          <div className="computer-empty">
+            <div className="computer-empty-icon">🖥</div>
+            <p>No screen yet. It appears here as soon as {name} uses its desktop.</p>
+            {computer?.last_action && <p className="muted small">Last action: {computer.last_action}</p>}
+            <p className="muted small">Commands and files don't produce screens; see the Files tab or connect live.</p>
+          </div>
+        ))}
+
         {tab === "live" && <>
+          {liveSrc ? <>
+            <iframe key={liveSrc} className="computer-live" src={liveSrc} title={`${name}'s live desktop`}
+              allow="clipboard-read; clipboard-write" referrerPolicy="no-referrer" />
+            <p className="muted small">Link valid until {time(live.expires_at)}.
+              {viewOnly ? " View only: take over to use the mouse and keyboard." : ""}</p>
+          </> : (
+            <div className="computer-empty">
+              <p>Watch {name}'s desktop in real time, or take over the mouse and keyboard.</p>
+              <p className="muted small">Connecting starts the computer if it is stopped. Taking over pauses the
+                agent's actions for up to 15 minutes. View-only mode is a convenience, not a security boundary.</p>
+            </div>
+          )}
           <div className="task-controls">
             <button className="chip" disabled={!!busy} onClick={() => void openLive(false)}>
-              {live ? "Reconnect" : "Open live view"}
+              {live ? "Reconnect" : "Connect"}
             </button>
             {!control?.mine && <button className="chip" disabled={!!busy} onClick={() => void openLive(true)}>Take over</button>}
             {control && <button className="chip" disabled={!!busy} onClick={() => void handBack()}>Hand back</button>}
           </div>
-          {liveSrc ? <>
-            <iframe key={liveSrc} className="computer-live" src={liveSrc} title="Live agent desktop"
-              allow="clipboard-read; clipboard-write" referrerPolicy="no-referrer" />
-            <p className="muted">Link valid until {time(live.expires_at)}; use Reconnect after that.
-              {viewOnly ? " View only. Take over to use the mouse and keyboard." : ""}</p>
-          </> : <p className="muted">Opening the live view starts this agent's computer if it is stopped.
-            Anyone in this channel can open it, and view-only mode is a convenience rather than a security
-            boundary. Taking over pauses the agent's actions for up to 15 minutes.</p>}
         </>}
-
-        {tab === "screen" && computer && (computer.image ? <>
-          <img className="computer-screen" src={computer.image} alt="Latest screenshot of the agent's Daytona desktop" />
-          <p className="muted">Last observed screen · {computer.width} × {computer.height}
-            {computer.updated_at && ` · ${new Date(computer.updated_at).toLocaleTimeString()}`}</p>
-        </> : <p className="muted">Screenshots appear here after the agent uses its desktop.</p>)}
 
         {tab === "files" && <>
           <div className="task-controls">
             <button className="chip" disabled={!!busy || path === ""} onClick={() => void browse(parent)}>Up</button>
             <code>{path || "home"}</code>
             <label className="chip">
-              Upload file
+              Upload
               <input type="file" hidden disabled={!!busy}
                 onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void upload(file); }} />
             </label>
@@ -202,14 +257,16 @@ export default function ComputerPanel({ taskId, onClose }: { taskId: string; onC
               )}
             </div>
           ))}
-          <p className="muted">Uploads go to the agent's uploads folder and are announced in the channel. Up to 25 MB.</p>
+          <p className="muted small">Uploads go to the agent's uploads folder and are announced in the channel. Up to 25 MB.</p>
         </>}
-
-        {computer?.sandbox_id && (
-          <p className="muted">Sandbox <code>{computer.sandbox_id}</code> ·{" "}
-            <a href={computer.dashboard_url} target="_blank" rel="noreferrer">Daytona dashboard</a></p>
-        )}
       </div>
-    </ModalShell>
+
+      <footer className="computer-foot">
+        <button className="chip" disabled={busy === "stop"} onClick={() => void stop()}>Stop computer</button>
+        {computer?.sandbox_id && (
+          <a className="small" href={computer.dashboard_url} target="_blank" rel="noreferrer">Daytona dashboard</a>
+        )}
+      </footer>
+    </aside>
   );
 }

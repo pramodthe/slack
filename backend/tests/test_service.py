@@ -11,7 +11,7 @@ import app.service as service_module
 from app.agent_runner import BandIdentity
 from app.auth import encrypt_secret
 from app.band_org import BandOrg, Owner
-from app.models import AgentProfile, Channel, ChannelMember, Message, User, db, init_db
+from app.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
 from app.service import AppService
 
 
@@ -41,12 +41,15 @@ class FakeOrg(BandOrg):
     async def messages_since(self, room_id: str, since):
         return list(self.inbox)
 
+    async def send(self, room_id: str, content: str, mentions: list[tuple[str, str]]) -> str:
+        return f"band-{len(content)}"
+
 
 @pytest.fixture
 def svc(monkeypatch) -> AppService:
     init_db()
     with db() as session:
-        for model in (Message, ChannelMember, AgentProfile, Channel, User):
+        for model in (AgentTask, DirectMessage, Message, ChannelMember, AgentProfile, Channel, User):
             for row in session.exec(select(model)).all():
                 session.delete(row)
         session.commit()
@@ -127,3 +130,37 @@ def test_agent_replies_to_the_owner_reach_humans_and_polling_dedupes(svc: AppSer
     ]
     with db() as session:
         assert session.get(ChannelMember, (channel_id, "agent", writer_id)) is not None
+
+
+def test_direct_messages_are_private_rooms_the_agent_answers_without_a_mention(svc: AppService):
+    async def scenario():
+        await svc._ensure_master()
+        user = _user()
+        master = svc.master()
+        scout = await svc.create_agent(name="Scout", role="researcher", instructions="", model=master.model,
+                                       channel_id=None, created_by=user.id)
+        dm = await svc.open_dm(user, scout)
+        assert await svc.open_dm(user, scout) == dm
+        assert svc.org.rooms == ["Alice + Scout"]
+        assert dm["is_dm"] and dm["dm_agent_id"] == scout.id
+        assert dm["human_ids"] == [user.id] and dm["agent_ids"] == [scout.id]
+        assert svc.org.participants[dm["band_room_id"]] == {svc.org.owner.id, scout.band_agent_id}
+
+        await svc._ensure_master()
+        with db() as session:
+            assert session.get(ChannelMember, (dm["id"], "agent", master.id)) is None
+
+        posted = await svc.post_human_message(user, dm["id"], "what changed this week? ask @Master too")
+        assert posted["mentions"] == [{"type": "agent", "id": scout.id, "name": "Scout"}]
+        with db() as session:
+            task = session.exec(select(AgentTask).where(AgentTask.channel_id == dm["id"])).one()
+            assert task.agent_id == scout.id
+            assert session.get(ChannelMember, (dm["id"], "agent", master.id)) is None
+
+        await svc.delete_agent(scout)
+        with db() as session:
+            assert session.get(DirectMessage, dm["id"]).agent_id is None
+        await svc.post_human_message(user, dm["id"], "anyone there?")
+        with db() as session:
+            assert len(session.exec(select(AgentTask).where(AgentTask.channel_id == dm["id"])).all()) == 1
+    asyncio.run(scenario())

@@ -15,8 +15,8 @@ from sqlalchemy import case, update
 from app.auth import current_user, hash_password, issue_token, user_id_from_token, verify_password
 from app.config import FRONTEND_DIST, MODELS, settings
 from app.events import bus
-from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, Message, TaskApproval, User, db,
-                        get_session, init_db, utcnow)
+from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
+                        TaskApproval, User, db, get_session, init_db, utcnow)
 from app.roles import ROLES
 from app.schedules import cancel_schedule, channel_schedules, describe, serialize_schedule
 from app.tasks import decide_approval, serialize_task, update_task
@@ -102,10 +102,13 @@ async def login(body: LoginBody, session: Session = Depends(get_session)):
 
 @app.get("/api/bootstrap")
 async def bootstrap(user: User = Depends(current_user), session: Session = Depends(get_session)):
+    dms = {dm.channel_id: dm for dm in session.exec(select(DirectMessage)).all()}
+    visible = [c for c in session.exec(select(Channel).order_by(Channel.name)).all()
+               if c.id not in dms or (dms[c.id].user_id == user.id and dms[c.id].agent_id is not None)]
     return {
         "me": serialize_user(user),
         "users": [serialize_user(u) for u in session.exec(select(User)).all()],
-        "channels": [service.serialize_channel(session, c) for c in session.exec(select(Channel).order_by(Channel.name)).all()],
+        "channels": [service.serialize_channel(session, c) for c in visible],
         "agents": [service.serialize_agent(a) for a in session.exec(select(AgentProfile)).all()],
         "roles": [{"id": k, **v} for k, v in ROLES.items()],
         "models": MODELS,
@@ -122,11 +125,17 @@ class ChannelBody(BaseModel):
     topic: str = Field(default="", max_length=200)
 
 
-def _channel_or_404(session: Session, channel_id: int) -> Channel:
+def _channel_or_404(session: Session, channel_id: int, user: User) -> Channel:
     channel = session.get(Channel, channel_id)
-    if not channel:
+    dm = session.get(DirectMessage, channel_id)
+    if not channel or (dm and dm.user_id != user.id):
         raise HTTPException(404, "Channel not found")
     return channel
+
+
+def _reject_dm(session: Session, channel_id: int, detail: str) -> None:
+    if session.get(DirectMessage, channel_id):
+        raise HTTPException(409, detail)
 
 
 @app.post("/api/channels")
@@ -139,7 +148,7 @@ async def create_channel(body: ChannelBody, user: User = Depends(current_user), 
 
 @app.post("/api/channels/{channel_id}/join")
 async def join_channel(channel_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
-    _channel_or_404(session, channel_id)
+    _channel_or_404(session, channel_id, user)
     if not session.get(ChannelMember, (channel_id, "human", user.id)):
         session.add(ChannelMember(channel_id=channel_id, member_type="human", member_id=user.id))
         session.commit()
@@ -149,6 +158,8 @@ async def join_channel(channel_id: int, user: User = Depends(current_user), sess
 
 @app.post("/api/channels/{channel_id}/leave")
 async def leave_channel(channel_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "You can't leave a direct message")
     member = session.get(ChannelMember, (channel_id, "human", user.id))
     if member:
         session.delete(member)
@@ -163,9 +174,10 @@ class ChannelAgentBody(BaseModel):
 
 @app.post("/api/channels/{channel_id}/agents")
 async def add_channel_agent(
-    channel_id: int, body: ChannelAgentBody, _user: User = Depends(current_user), session: Session = Depends(get_session)
+    channel_id: int, body: ChannelAgentBody, user: User = Depends(current_user), session: Session = Depends(get_session)
 ):
-    _channel_or_404(session, channel_id)
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "Direct messages are one person and one agent")
     profile = _agent_or_404(session, body.agent_id)
     await service.add_agent_to_channel(channel_id, profile)
     return {"ok": True}
@@ -173,9 +185,10 @@ async def add_channel_agent(
 
 @app.delete("/api/channels/{channel_id}/agents/{agent_id}")
 async def remove_channel_agent(
-    channel_id: int, agent_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)
+    channel_id: int, agent_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)
 ):
-    _channel_or_404(session, channel_id)
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "Direct messages are one person and one agent")
     await service.remove_agent_from_channel(channel_id, _agent_or_404(session, agent_id))
     return {"ok": True}
 
@@ -185,10 +198,10 @@ async def list_messages(
     channel_id: int,
     before: int | None = None,
     limit: int = 100,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     session: Session = Depends(get_session),
 ):
-    _channel_or_404(session, channel_id)
+    _channel_or_404(session, channel_id, user)
     query = select(Message).where(Message.channel_id == channel_id)
     if before:
         query = query.where(Message.id < before)
@@ -204,7 +217,7 @@ class MessageBody(BaseModel):
 async def post_message(
     channel_id: int, body: MessageBody, user: User = Depends(current_user), session: Session = Depends(get_session)
 ):
-    _channel_or_404(session, channel_id)
+    _channel_or_404(session, channel_id, user)
     if not session.get(ChannelMember, (channel_id, "human", user.id)):
         session.add(ChannelMember(channel_id=channel_id, member_type="human", member_id=user.id))
         session.commit()
@@ -239,14 +252,17 @@ def _validate_role_and_model(role: str | None, model: str | None) -> None:
 @app.post("/api/agents")
 async def create_agent(body: AgentCreateBody, user: User = Depends(current_user), session: Session = Depends(get_session)):
     _validate_role_and_model(body.role, body.model)
-    if body.channel_id is not None:
-        _channel_or_404(session, body.channel_id)
+    channel_id = body.channel_id
+    if channel_id is not None:
+        _channel_or_404(session, channel_id, user)
+        if session.get(DirectMessage, channel_id):
+            channel_id = None
     profile = await service.create_agent(
         name=body.name,
         role=body.role,
         instructions=body.instructions,
         model=body.model,
-        channel_id=body.channel_id,
+        channel_id=channel_id,
         created_by=user.id,
     )
     return service.serialize_agent(profile)
@@ -286,6 +302,11 @@ async def restart_agent(agent_id: int, _user: User = Depends(current_user), sess
     return service.serialize_agent(profile)
 
 
+@app.post("/api/agents/{agent_id}/dm")
+async def open_dm(agent_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    return await service.open_dm(user, _agent_or_404(session, agent_id))
+
+
 @app.delete("/api/agents/{agent_id}")
 async def delete_agent(agent_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
     await service.delete_agent(_agent_or_404(session, agent_id))
@@ -296,8 +317,8 @@ async def delete_agent(agent_id: int, _user: User = Depends(current_user), sessi
 
 
 @app.get("/api/channels/{channel_id}/tasks")
-async def list_tasks(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
-    _channel_or_404(session, channel_id)
+async def list_tasks(channel_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
     rows = session.exec(select(AgentTask).where(AgentTask.channel_id == channel_id)
                         .order_by(AgentTask.created_at.desc()).limit(30)).all()
     return [serialize_task(task) for task in rows]
@@ -316,8 +337,11 @@ def _require_task_member(session: Session, task: AgentTask, user: User) -> None:
 
 
 @app.get("/api/tasks/{task_id}")
-async def task_detail(task_id: str, _user: User = Depends(current_user), session: Session = Depends(get_session)):
+async def task_detail(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
     task = _task_or_404(session, task_id)
+    dm = session.get(DirectMessage, task.channel_id)
+    if dm and dm.user_id != user.id:
+        raise HTTPException(404, "Task not found")
     return {**serialize_task(task), "result": task.result, "artifacts": task.artifacts}
 
 
@@ -343,6 +367,27 @@ async def task_computer(task_id: str, user: User = Depends(current_user), sessio
 
 
 NO_STORE = {"Cache-Control": "no-store"}
+
+
+@app.get("/api/channels/{channel_id}/computers")
+async def channel_computers(channel_id: int, user: User = Depends(current_user),
+                            session: Session = Depends(get_session)):
+    """Each agent's computer in this channel, without screenshots, so clients can poll it cheaply."""
+    _channel_or_404(session, channel_id, user)
+    computers = []
+    for agent_id in session.exec(select(AgentTask.agent_id).where(AgentTask.channel_id == channel_id).distinct()).all():
+        latest = session.exec(select(AgentTask).where(AgentTask.channel_id == channel_id, AgentTask.agent_id == agent_id)
+                              .order_by(AgentTask.created_at.desc())).first()
+        row = sandbox_record(computer_key(latest))
+        if row is None:
+            continue
+        working = session.exec(select(AgentTask.id).where(AgentTask.channel_id == channel_id,
+                               AgentTask.agent_id == agent_id, AgentTask.status == "running")).first()
+        computers.append({"agent_id": agent_id, "task_id": latest.id, "status": row.status,
+                          "last_action": row.last_action, "updated_at": row.updated_at.isoformat(),
+                          "agent_working": working is not None})
+    computers.sort(key=lambda c: c["updated_at"], reverse=True)
+    return JSONResponse(computers, headers=NO_STORE)
 
 
 def computer_factory(task: AgentTask) -> TaskComputer:
@@ -493,8 +538,8 @@ async def retry_task(task_id: str, user: User = Depends(current_user), session: 
 
 
 @app.get("/api/channels/{channel_id}/approvals")
-async def list_approvals(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
-    _channel_or_404(session, channel_id)
+async def list_approvals(channel_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
     return session.exec(select(TaskApproval).join(AgentTask, AgentTask.id == TaskApproval.task_id).where(
         TaskApproval.channel_id == channel_id, TaskApproval.status == "pending", AgentTask.status == "waiting")
         .order_by(TaskApproval.created_at)).all()
@@ -523,8 +568,8 @@ async def decide(approval_id: str, body: DecisionBody, user: User = Depends(curr
 
 
 @app.get("/api/channels/{channel_id}/schedules")
-async def list_schedules(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
-    _channel_or_404(session, channel_id)
+async def list_schedules(channel_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
     return [serialize_schedule(s) for s in channel_schedules(channel_id)]
 
 
@@ -542,9 +587,9 @@ async def delete_schedule(channel_id: int, schedule_id: int, user: User = Depend
 
 
 @app.get("/api/channels/{channel_id}/agents/{agent_id}/memories")
-async def list_memories(channel_id: int, agent_id: int, _user: User = Depends(current_user),
+async def list_memories(channel_id: int, agent_id: int, user: User = Depends(current_user),
                         session: Session = Depends(get_session)):
-    _channel_or_404(session, channel_id)
+    _channel_or_404(session, channel_id, user)
     return session.exec(select(AgentMemory).where(AgentMemory.agent_id == agent_id,
                         AgentMemory.channel_id == channel_id)).all()
 

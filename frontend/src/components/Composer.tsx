@@ -21,6 +21,7 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
   const [sending, setSending] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
   const master = Object.values(state.agents).find((a) => a.is_master);
+  const dmAgent = channel.dm_agent_id != null ? state.agents[channel.dm_agent_id] : null;
 
   const candidates = useMemo<Candidate[]>(() => {
     if (query === null) return [];
@@ -49,6 +50,7 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
   }, [query, state.agents, state.users, state.me.id, channel]);
 
   const updateQuery = (value: string, caret: number) => {
+    if (channel.is_dm) return;
     const match = /(^|\s)@([^\s@]*)$/.exec(value.slice(0, caret));
     setQuery(match ? match[2] : null);
     setHighlight(0);
@@ -134,9 +136,11 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
           rows={1}
           value={text}
           placeholder={
-            master
-              ? `Message #${channel.name}. Ask @${master.name} to build a team, or @mention anyone`
-              : `Message #${channel.name}. Type @ to mention an agent or teammate`
+            dmAgent
+              ? `Message ${dmAgent.name}`
+              : master
+                ? `Message #${channel.name}. Ask @${master.name} to build a team, or @mention anyone`
+                : `Message #${channel.name}. Type @ to mention an agent or teammate`
           }
           onChange={(e) => {
             setText(e.target.value);
