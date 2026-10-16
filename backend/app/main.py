@@ -15,10 +15,12 @@ from sqlalchemy import case, update
 from app.auth import current_user, hash_password, issue_token, user_id_from_token, verify_password
 from app.config import FRONTEND_DIST, MODELS, settings
 from app.events import bus
-from app.models import AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, Message, User, db, get_session, init_db, utcnow
+from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, Message, TaskApproval, User, db,
+                        get_session, init_db, utcnow)
 from app.roles import ROLES
-from app.tasks import serialize_task, update_task
-from app.computer import sandbox_record
+from app.schedules import cancel_schedule, channel_schedules, describe, serialize_schedule
+from app.tasks import decide_approval, serialize_task, update_task
+from app.computer import computer_key, sandbox_record
 from app.service import ServiceError, serialize_message, serialize_user, service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -320,7 +322,8 @@ async def task_detail(task_id: str, _user: User = Depends(current_user), session
 async def task_computer(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
     task = _task_or_404(session, task_id)
     _require_task_member(session, task, user)
-    row = sandbox_record(task_id)
+    # Computers persist per agent and channel; tasks from before that change kept their own.
+    row = sandbox_record(computer_key(task)) or sandbox_record(task_id)
     return JSONResponse({
         "configured": bool(settings.daytona_api_key),
         "status": row.status if row else "not_started",
@@ -339,12 +342,13 @@ async def task_computer(task_id: str, user: User = Depends(current_user), sessio
 async def cancel_task(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
     task = _task_or_404(session, task_id)
     _require_task_member(session, task, user)
-    if task.status not in {"queued", "running"}:
-        raise HTTPException(409, "Only queued or running tasks can be cancelled")
-    session.exec(update(AgentTask).where(AgentTask.id == task_id, AgentTask.status.in_(["queued", "running"]))
+    if task.status not in {"queued", "running", "waiting"}:
+        raise HTTPException(409, "Only queued, running, or waiting tasks can be cancelled")
+    idle = AgentTask.status.in_(["queued", "waiting"])
+    session.exec(update(AgentTask).where(AgentTask.id == task_id, AgentTask.status.in_(["queued", "running", "waiting"]))
                  .values(cancel_requested=True,
-                         status=case((AgentTask.status == "queued", "cancelled"), else_=AgentTask.status),
-                         progress=case((AgentTask.status == "queued", "Cancelled"), else_="Cancellation requested"),
+                         status=case((idle, "cancelled"), else_=AgentTask.status),
+                         progress=case((idle, "Cancelled"), else_="Cancellation requested"),
                          updated_at=utcnow()))
     session.commit()
     session.expire_all()
@@ -363,6 +367,54 @@ async def retry_task(task_id: str, user: User = Depends(current_user), session: 
     session.commit()
     session.expire_all()
     return serialize_task(session.get(AgentTask, task_id))
+
+
+@app.get("/api/channels/{channel_id}/approvals")
+async def list_approvals(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id)
+    return session.exec(select(TaskApproval).where(TaskApproval.channel_id == channel_id,
+                        TaskApproval.status == "pending").order_by(TaskApproval.created_at)).all()
+
+
+class DecisionBody(BaseModel):
+    approve: bool
+    note: str = Field(default="", max_length=2000)
+
+
+@app.post("/api/approvals/{approval_id}")
+async def decide(approval_id: str, body: DecisionBody, user: User = Depends(current_user),
+                 session: Session = Depends(get_session)):
+    approval = session.get(TaskApproval, approval_id)
+    if approval is None:
+        raise HTTPException(404, "Approval request not found")
+    if not session.get(ChannelMember, (approval.channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to decide its approvals")
+    decided = decide_approval(approval_id, approve=body.approve, decided_by=user.display_name, note=body.note)
+    if decided is None:
+        raise HTTPException(409, "This request was already decided")
+    verdict = "approved" if body.approve else "denied"
+    await service.system_message(decided.channel_id, f"{user.display_name} {verdict}: {decided.action}"
+                                 + (f" ({body.note})" if body.note else ""))
+    return decided
+
+
+@app.get("/api/channels/{channel_id}/schedules")
+async def list_schedules(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id)
+    return [serialize_schedule(s) for s in channel_schedules(channel_id)]
+
+
+@app.delete("/api/channels/{channel_id}/schedules/{schedule_id}")
+async def delete_schedule(channel_id: int, schedule_id: int, user: User = Depends(current_user),
+                          session: Session = Depends(get_session)):
+    if not session.get(ChannelMember, (channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to manage its schedules")
+    cancelled = cancel_schedule(channel_id, schedule_id)
+    if cancelled is None:
+        raise HTTPException(404, "Schedule not found")
+    await service.system_message(channel_id, f"{user.display_name} cancelled a schedule ({describe(cancelled)}): "
+                                             f"{cancelled.prompt[:200]}")
+    return {"ok": True}
 
 
 @app.get("/api/channels/{channel_id}/agents/{agent_id}/memories")

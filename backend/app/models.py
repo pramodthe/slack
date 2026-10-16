@@ -109,6 +109,55 @@ class TaskSandbox(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class TaskHandoff(SQLModel, table=True):
+    """Links a task to the teammate hand-off chain that created it, without new AgentTask columns."""
+    task_id: str = Field(primary_key=True)
+    root_task_id: str = Field(index=True)
+    parent_task_id: str
+    from_agent_id: int
+    kind: str  # "handoff": a teammate's assigned task; "report": the follow-up returned to the requester
+    request: str = ""
+    report_back: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class TaskApproval(SQLModel, table=True):
+    """An agent action paused for a human decision. The id is the LangGraph interrupt id."""
+    id: str = Field(primary_key=True)
+    task_id: str = Field(index=True)
+    channel_id: int = Field(index=True)
+    agent_id: int
+    action: str
+    details: str = ""
+    status: str = Field(default="pending", index=True)  # pending | approved | denied
+    decided_by: str = ""
+    note: str = ""
+    created_at: datetime = Field(default_factory=utcnow)
+    decided_at: datetime | None = None
+
+
+class Schedule(SQLModel, table=True):
+    """A recurring or one-off request that the worker turns into an agent task when due."""
+    id: int | None = Field(default=None, primary_key=True)
+    source_key: str = Field(unique=True, index=True)  # creating task + tool call, for replay-safe creation
+    channel_id: int = Field(index=True)
+    agent_id: int = Field(index=True)
+    room_id: str
+    reply_to: str = ""
+    prompt: str
+    cadence: str  # once | daily | weekdays | weekly | interval
+    time_of_day: str = ""  # HH:MM in `timezone`
+    weekday: int | None = None  # 0 = Monday, for weekly
+    run_date: str = ""  # YYYY-MM-DD, for once
+    interval_minutes: int = 0
+    timezone: str = "UTC"
+    next_run_at: datetime | None = Field(default=None, index=True)
+    enabled: bool = Field(default=True, index=True)
+    created_by: str = ""
+    last_run_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
 

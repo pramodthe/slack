@@ -74,3 +74,56 @@ def test_empty_query_does_not_call_exa(monkeypatch):
         pytest.fail("Empty queries must not make API calls")
     fake_exa(monkeypatch, handle)
     assert "nonempty" in asyncio.run(search_tool().ainvoke({"query": "  "}))["error"]
+
+
+def fetch_tool():
+    task = AgentTask(id="fetch-test", source_key="fetch-test", channel_id=1,
+                     agent_id=1, room_id="test", prompt="Read a page")
+    return next(tool for tool in tools_for(task) if tool.name == "fetch_page")
+
+
+def test_fetch_page_requests_one_url_and_bounds_text(monkeypatch):
+    def handle(request):
+        assert str(request.url) == "https://api.exa.ai/contents"
+        assert request.headers["x-api-key"] == "test-secret"
+        body = json.loads(request.content)
+        assert body == {"urls": ["https://example.com/a"], "text": {"maxCharacters": 20000},
+                        "livecrawlTimeout": 15000}
+        return httpx.Response(200, json={
+            "results": [{"title": "Example", "url": "https://example.com/a", "text": "x" * 25000,
+                         "publishedDate": "2026-10-16"}],
+            "statuses": [{"id": "https://example.com/a", "status": "success", "source": "crawled"}]})
+    fake_exa(monkeypatch, handle)
+    result = asyncio.run(fetch_tool().ainvoke({"url": " https://example.com/a "}))
+    assert result["title"] == "Example" and result["url"] == "https://example.com/a"
+    assert len(result["content"]) == 20000
+    assert result["published_date"] == "2026-10-16"
+
+
+def test_fetch_page_reports_per_url_failure(monkeypatch):
+    fake_exa(monkeypatch, lambda request: httpx.Response(200, json={"results": [], "statuses": [
+        {"id": "https://example.com", "status": "error",
+         "error": {"tag": "CRAWL_NOT_FOUND", "httpStatusCode": 404}}]}))
+    result = asyncio.run(fetch_tool().ainvoke({"url": "https://example.com"}))
+    assert "CRAWL_NOT_FOUND" in result["error"] and result["retryable"] is False
+
+
+@pytest.mark.parametrize("url", ["example.com", "file:///etc/passwd", "ftp://example.com/x",
+                                 "https://", "https://example.com/" + "a" * 2048])
+def test_fetch_page_rejects_invalid_urls_without_calling_exa(monkeypatch, url):
+    def handle(request):
+        pytest.fail("Invalid URLs must not make API calls")
+    fake_exa(monkeypatch, handle)
+    assert "http(s) URL" in asyncio.run(fetch_tool().ainvoke({"url": url}))["error"]
+
+
+def test_fetch_page_http_errors_do_not_leak_response_body(monkeypatch):
+    fake_exa(monkeypatch, lambda request: httpx.Response(503, text="private error test-secret"))
+    result = asyncio.run(fetch_tool().ainvoke({"url": "https://example.com"}))
+    assert "page fetch failed (HTTP 503)" in result["error"] and result["retryable"] is True
+    assert "test-secret" not in str(result)
+
+
+def test_fetch_page_unconfigured(monkeypatch):
+    monkeypatch.setattr(module, "settings", SimpleNamespace(exa_api_key=""))
+    assert "not configured" in asyncio.run(fetch_tool().ainvoke({"url": "https://example.com"}))["error"]

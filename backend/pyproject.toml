@@ -15,10 +15,12 @@ dependencies = [
     "langchain>=1.4.6",
     "langchain-anthropic>=1.7.6",
     "langchain-core>=1.6.11",
+    "langchain-mcp-adapters>=0.3.2",
     "langgraph>=1.2.15",
     "langgraph-checkpoint-sqlite>=3.1.2",
     "python-dotenv>=1.2.4",
     "sqlmodel>=0.0.48",
+    "tzdata>=2026.5",
     "uvicorn[standard]>=0.54.0",
 ]
 

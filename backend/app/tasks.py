@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from app.models import AgentTask, db, utcnow
+from app.models import AgentProfile, AgentTask, ChannelMember, Message, TaskApproval, TaskHandoff, db, utcnow
+
+# Teammate hand-offs allowed per original request; each also yields at most one report back.
+MAX_HANDOFFS = 6
 
 
 def serialize_task(task: AgentTask) -> dict:
@@ -59,10 +63,16 @@ def recover_tasks() -> None:
 
 
 def next_task() -> AgentTask | None:
-    # A filesystem lock guarantees one worker for this local deployment.
+    """Claim the oldest queued task whose agent is not already running in that channel.
+
+    Keeping each agent sequential per channel preserves conversational order; other agents
+    and channels run in parallel. A filesystem lock guarantees one worker for this deployment.
+    """
     with db() as session:
-        task = session.exec(select(AgentTask).where(AgentTask.status == "queued")
-                            .order_by(AgentTask.created_at)).first()
+        busy = {(t.agent_id, t.channel_id) for t in session.exec(
+            select(AgentTask).where(AgentTask.status == "running")).all()}
+        task = next((t for t in session.exec(select(AgentTask).where(AgentTask.status == "queued")
+                     .order_by(AgentTask.created_at)).all() if (t.agent_id, t.channel_id) not in busy), None)
         if task is None:
             return None
         task.status = "running"
@@ -73,3 +83,159 @@ def next_task() -> AgentTask | None:
         session.commit()
         session.refresh(task)
         return task
+
+
+def channel_context(session, channel_id: int) -> str:
+    """Recent channel messages, bounded like Band turns; the harness treats them as untrusted."""
+    recent = session.exec(select(Message).where(Message.channel_id == channel_id)
+                          .order_by(Message.id.desc()).limit(30)).all()
+    return "\n".join(f"{m.author_name}: {m.content}" for m in reversed(recent))[-24000:]
+
+
+def hand_off(task: AgentTask, *, teammate: str, request: str, report_back: bool, call_id: str) -> dict:
+    """Post a visible request to a teammate and queue their task atomically.
+
+    The tool call id makes a replayed call (after a worker crash) return the original hand-off.
+    """
+    request = request.strip()
+    if not request or len(request) > 8000:
+        return {"error": "Provide a request of 1-8000 characters."}
+    with db() as session:
+        sender = session.get(AgentProfile, task.agent_id)
+        others = [a for a in session.exec(select(AgentProfile)).all() if a.id != task.agent_id]
+        wanted = teammate.strip().lstrip("@").lower()
+        target = next((a for a in others if wanted in (a.name.lower(), (a.handle or "").lower())), None)
+        if sender is None or target is None:
+            names = ", ".join(a.name for a in others) or "none"
+            return {"error": f"No teammate named {teammate!r}. Available teammates: {names}. "
+                             "Use internal helpers if none fit."}
+        source_key = f"{target.id}:{task.room_id}:handoff-{call_id}"
+        existing = session.exec(select(AgentTask).where(AgentTask.source_key == source_key)).first()
+        if existing:
+            return {"status": "handed_off", "teammate": target.name, "task_id": existing.id}
+        link = session.get(TaskHandoff, task.id)
+        root = link.root_task_id if link else task.id
+        used = session.exec(select(TaskHandoff.task_id).where(
+            TaskHandoff.root_task_id == root, TaskHandoff.kind == "handoff")).all()
+        if len(used) >= MAX_HANDOFFS:
+            return {"error": f"This request already used {MAX_HANDOFFS} teammate hand-offs. "
+                             "Finish the work yourself and answer the humans."}
+        child = AgentTask(id=uuid4().hex, source_key=source_key, channel_id=task.channel_id,
+                          agent_id=target.id, room_id=task.room_id, prompt=f"**{sender.name}:** {request}",
+                          context=channel_context(session, task.channel_id),
+                          # A report-back answer goes to the requester, so it stays local instead of pinging Band.
+                          reply_to="" if report_back else task.reply_to)
+        session.add_all([
+            Message(channel_id=task.channel_id, author_type="agent", author_id=sender.id,
+                    author_name=sender.name, content=f"@{target.name} {request}", to_humans=False,
+                    mentions=[{"type": "agent", "id": target.id, "name": target.name}],
+                    band_message_id=f"handoff:{call_id}"),
+            child,
+            TaskHandoff(task_id=child.id, root_task_id=root, parent_task_id=task.id,
+                        from_agent_id=sender.id, kind="handoff", request=request, report_back=report_back),
+        ])
+        if not session.get(ChannelMember, (task.channel_id, "agent", target.id)):
+            session.add(ChannelMember(channel_id=task.channel_id, member_type="agent", member_id=target.id))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            existing = session.exec(select(AgentTask).where(AgentTask.source_key == source_key)).one()
+            return {"status": "handed_off", "teammate": target.name, "task_id": existing.id}
+    return {"status": "handed_off", "teammate": target.name, "task_id": child.id,
+            "note": (f"{target.name} runs after your turn ends. " + (
+                "You will get a new task with their answer. End your turn now with a one-line status."
+                if report_back else f"{target.name} will answer the humans directly."))}
+
+
+def report_target(session, task: AgentTask) -> tuple[TaskHandoff, AgentProfile] | None:
+    """The requester waiting for this task's answer, if it was a report-back hand-off."""
+    link = session.get(TaskHandoff, task.id)
+    if link is None or link.kind != "handoff" or not link.report_back:
+        return None
+    requester = session.get(AgentProfile, link.from_agent_id)
+    return (link, requester) if requester else None
+
+
+def queue_report(session, task: AgentTask, link: TaskHandoff, teammate_name: str, result: str) -> None:
+    """Called inside the completion transaction so an answer is reported back exactly once."""
+    source_key = f"{link.from_agent_id}:{task.room_id}:report-{task.id}"
+    if session.exec(select(AgentTask.id).where(AgentTask.source_key == source_key)).first():
+        return
+    root = session.get(AgentTask, link.root_task_id)
+    parent = session.get(AgentTask, link.parent_task_id)
+    # Sibling hand-offs from the same turn may still be running in parallel.
+    waiting = session.exec(select(AgentProfile.name).join(AgentTask, AgentTask.agent_id == AgentProfile.id)
+                           .join(TaskHandoff, TaskHandoff.task_id == AgentTask.id).where(
+        TaskHandoff.parent_task_id == link.parent_task_id, TaskHandoff.kind == "handoff",
+        AgentTask.id != task.id, AgentTask.status.in_(["queued", "running"]))).all()
+    prompt = (f"{teammate_name} finished the work you handed off.\n\nYou asked:\n{link.request}\n\n"
+              f"{teammate_name} answered:\n{result[:20000]}\n\n"
+              + (f"The original request was:\n{root.prompt}\n\n" if root else "")
+              + (f"Still working on your other hand-offs: {', '.join(sorted(set(waiting)))}. If you need their "
+                 "results, reply with a one-line status; each answer arrives as a new task. Earlier answers "
+                 "are in the room context.\n\n" if waiting else "")
+              + "Continue the original request: combine the results, hand off the next step, "
+                "or give the humans the final answer.")
+    follow_up = AgentTask(id=uuid4().hex, source_key=source_key, channel_id=task.channel_id,
+                          agent_id=link.from_agent_id, room_id=task.room_id, prompt=prompt,
+                          context=channel_context(session, task.channel_id),
+                          reply_to=parent.reply_to if parent else "")
+    session.add_all([follow_up, TaskHandoff(task_id=follow_up.id, root_task_id=link.root_task_id,
+                                            parent_task_id=task.id, from_agent_id=task.agent_id,
+                                            kind="report", report_back=False)])
+
+
+def await_approval(task: AgentTask, requests: list[tuple[str, dict]]) -> None:
+    """Record paused actions, tell the channel, and park the task until every request is decided."""
+    with db() as session:
+        profile = session.get(AgentProfile, task.agent_id)
+        for approval_id, value in requests:
+            if session.get(TaskApproval, approval_id):
+                continue
+            action = str(value.get("action") or "Unspecified action")[:500]
+            details = str(value.get("details") or "")[:4000]
+            session.add(TaskApproval(id=approval_id, task_id=task.id, channel_id=task.channel_id,
+                                     agent_id=task.agent_id, action=action, details=details))
+            session.add(Message(channel_id=task.channel_id, author_type="agent", author_id=task.agent_id,
+                                author_name=profile.name if profile else "Agent", to_humans=True,
+                                content=f"**Approval needed:** {action}" + (f"\n\n{details}" if details else "")
+                                        + "\n\nApprove or deny it in the Agent tasks panel.",
+                                band_message_id=f"approval:{approval_id}"))
+        # A cancellation requested while the task ran wins over waiting.
+        session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running",
+                                             AgentTask.cancel_requested == True)  # noqa: E712
+                     .values(status="cancelled", progress="Cancelled", updated_at=utcnow()))
+        session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running")
+                     .values(status="waiting", progress="Waiting for approval", updated_at=utcnow()))
+        session.commit()
+
+
+def approval_decisions(interrupt_ids: list[str]) -> dict[str, dict] | None:
+    """Resume values keyed by interrupt id, or None while any request is undecided."""
+    with db() as session:
+        rows = [session.get(TaskApproval, approval_id) for approval_id in interrupt_ids]
+    if any(row is None or row.status == "pending" for row in rows):
+        return None
+    return {row.id: {"approved": row.status == "approved", "decided_by": row.decided_by, "note": row.note}
+            for row in rows}
+
+
+def decide_approval(approval_id: str, *, approve: bool, decided_by: str, note: str = "") -> TaskApproval | None:
+    """Apply a decision once; requeue the task when its last pending request is decided."""
+    with db() as session:
+        claimed = session.exec(update(TaskApproval).where(
+            TaskApproval.id == approval_id, TaskApproval.status == "pending").values(
+            status="approved" if approve else "denied", decided_by=decided_by, note=note[:2000],
+            decided_at=utcnow()))
+        if not claimed.rowcount:
+            session.rollback()
+            return None
+        approval = session.get(TaskApproval, approval_id)
+        if not session.exec(select(TaskApproval.id).where(TaskApproval.task_id == approval.task_id,
+                                                          TaskApproval.status == "pending")).first():
+            session.exec(update(AgentTask).where(AgentTask.id == approval.task_id, AgentTask.status == "waiting")
+                         .values(status="queued", progress="Decision received; resuming", updated_at=utcnow()))
+        session.commit()
+        session.refresh(approval)
+        return approval

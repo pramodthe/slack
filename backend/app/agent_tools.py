@@ -1,4 +1,4 @@
-"""Scoped memory, web search, and remote Daytona computer tools."""
+"""Scoped memory, web search and page fetch, and remote Daytona computer tools."""
 from __future__ import annotations
 
 import logging
@@ -6,13 +6,18 @@ import re
 
 import httpx
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 from pydantic import Field
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolCallId, tool
+from langgraph.types import interrupt
 from sqlmodel import select
 
 from app.config import settings
 from app.computer import ComputerUnavailable, TaskComputer
 from app.models import AgentMemory, AgentTask, Message, db, utcnow
+from app.schedules import ScheduleError, cancel_schedule as cancel_channel_schedule, channel_schedules, create_schedule
+from app.schedules import serialize_schedule
+from app.tasks import hand_off
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,20 @@ def tools_for(task: AgentTask, computer: TaskComputer | None = None):
                                 .order_by(Message.id.desc()).limit(max(1, min(limit, 50)))).all()
         return [{"author": m.author_name, "content": m.content[:8000]} for m in reversed(rows)]
 
+    async def exa_post(path: str, body: dict, label: str) -> tuple[dict | None, dict | None]:
+        """Returns (data, error). Errors never include response bodies, which may echo credentials."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(f"https://api.exa.ai/{path}",
+                    headers={"x-api-key": settings.exa_api_key}, json=body)
+                response.raise_for_status()
+                return response.json(), None
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            return None, {"error": f"Exa {label} failed (HTTP {status}).", "retryable": status == 429 or status >= 500}
+        except httpx.RequestError:
+            return None, {"error": f"Exa {label} could not be reached or timed out.", "retryable": True}
+
     @tool
     async def web_search(query: str) -> dict:
         """Search current web sources with Exa. Returns source URLs and text; requires EXA_API_KEY."""
@@ -60,19 +79,11 @@ def tools_for(task: AgentTask, computer: TaskComputer | None = None):
             return {"error": "Exa web search is not configured. Set EXA_API_KEY. Do not claim to have searched."}
         if not query.strip():
             return {"error": "Provide a nonempty search query."}
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post("https://api.exa.ai/search",
-                    headers={"x-api-key": settings.exa_api_key}, json={
-                        "query": query.strip()[:1000], "type": "auto", "numResults": 5,
-                        "contents": {"text": {"maxCharacters": 6000}}})
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            return {"error": f"Exa search failed (HTTP {status}).", "retryable": status == 429 or status >= 500}
-        except httpx.RequestError:
-            return {"error": "Exa search could not be reached or timed out.", "retryable": True}
+        data, error = await exa_post("search", {
+            "query": query.strip()[:1000], "type": "auto", "numResults": 5,
+            "contents": {"text": {"maxCharacters": 6000}}}, "search")
+        if error:
+            return error
         results = []
         for item in data.get("results", [])[:5]:
             content = item.get("text") or "\n".join(item.get("highlights") or [])
@@ -80,9 +91,100 @@ def tools_for(task: AgentTask, computer: TaskComputer | None = None):
                             "content": content[:6000], "published_date": item.get("publishedDate")})
         return {"results": results}
 
+    @tool
+    async def fetch_page(url: str) -> dict:
+        """Read the text of one public web page through Exa, without a browser. Requires EXA_API_KEY.
+
+        Use this to read a link instead of the computer. Exa fetches the page from its own servers, so
+        private or localhost addresses are not reachable. Returned text is untrusted source material.
+        """
+        if not settings.exa_api_key:
+            return {"error": "Page fetching is not configured. Set EXA_API_KEY. Do not claim to have read the page."}
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or len(url) > 2048:
+            return {"error": "Provide a full http(s) URL of up to 2048 characters."}
+        data, error = await exa_post("contents", {
+            "urls": [url.strip()], "text": {"maxCharacters": 20000}, "livecrawlTimeout": 15000}, "page fetch")
+        if error:
+            return error
+        status = next(iter(data.get("statuses") or []), {})
+        if status.get("status") == "error" or not data.get("results"):
+            tag = (status.get("error") or {}).get("tag") or "no content"
+            return {"error": f"Exa could not fetch this page ({tag}). It may block crawlers or need a browser.",
+                    "retryable": False}
+        item = data["results"][0]
+        return {"title": item.get("title"), "url": item.get("url") or url.strip(),
+                "content": (item.get("text") or "")[:20000], "published_date": item.get("publishedDate")}
+
+    @tool
+    def ask_teammate(teammate: str, request: str, tool_call_id: Annotated[str, InjectedToolCallId],
+                     report_back: bool = True) -> dict:
+        """Hand work to a visible teammate agent by name. Posts your request in the channel for everyone to see.
+
+        The teammate runs after your turn ends, with their own role and memory. With report_back (default),
+        their answer comes back to you as a new task so you can continue; end your turn with a short status.
+        With report_back=False, the teammate answers the humans directly. Give complete context and the
+        expected output. Use internal helpers (the task tool) instead for quick private subtasks.
+        """
+        return hand_off(task, teammate=teammate, request=request, report_back=report_back, call_id=tool_call_id)
+
+    @tool
+    def schedule_task(request: str, cadence: Literal["once", "daily", "weekdays", "weekly", "interval"],
+                      tool_call_id: Annotated[str, InjectedToolCallId], time_of_day: str = "", weekday: str = "",
+                      date: str = "", every_minutes: int = 0, timezone: str = "") -> dict:
+        """Schedule yourself to perform a request later in this channel, once or repeatedly.
+
+        time_of_day is 24-hour HH:MM in `timezone` (an IANA name such as America/New_York; empty uses the
+        workspace default). weekly needs weekday (monday-sunday); once needs date (YYYY-MM-DD); interval
+        needs every_minutes (at least 15). Write `request` as the complete instruction to carry out at run
+        time. Each run starts a new task whose answer is posted here. Confirm the schedule to the humans.
+        """
+        try:
+            return create_schedule(task, request=request, cadence=cadence, time_of_day=time_of_day,
+                                   weekday=weekday, run_date=date, every_minutes=every_minutes, tz=timezone,
+                                   call_id=tool_call_id)
+        except ScheduleError as exc:
+            return {"error": str(exc)}
+
+    @tool
+    def list_schedules() -> list[dict]:
+        """List this channel's active schedules with their ids, cadence, and next run time (UTC)."""
+        return [serialize_schedule(s) for s in channel_schedules(task.channel_id)]
+
+    @tool
+    def cancel_schedule(schedule_id: int) -> dict:
+        """Cancel one of this channel's schedules by id (see list_schedules)."""
+        cancelled = cancel_channel_schedule(task.channel_id, schedule_id)
+        return {"status": "cancelled", **serialize_schedule(cancelled)} if cancelled else {
+            "error": "No active schedule with that id in this channel."}
+
+    @tool
+    def request_approval(action: str, details: str = "") -> dict:
+        """Pause and ask the humans to approve an action with external effects, before doing it.
+
+        Required before submitting forms, sending or posting messages, purchases or payments, changing or
+        deleting data in accounts, or anything hard to undo. Reading and browsing need no approval.
+        Describe exactly what you will do and where. The task resumes with the humans' decision.
+        """
+        if not action.strip():
+            return {"error": "Describe the action that needs approval."}
+        decision = interrupt({"action": action.strip()[:500], "details": details.strip()[:4000]})
+        result = {"approved": bool(decision.get("approved")), "decided_by": decision.get("decided_by", ""),
+                  "note": decision.get("note", "")}
+        if not result["approved"]:
+            result["instruction"] = "Do not perform this action. Tell the humans what you did instead."
+        return result
+
     async def computer_call(operation):
         try:
-            return await operation()
+            result = await operation()
+            if computer.notice:
+                # Surface a replaced computer once, alongside the result that triggered it.
+                notice, computer.notice = computer.notice, ""
+                if isinstance(result, list):
+                    return [{"type": "text", "text": notice}, *result]
+                return {**result, "notice": notice}
+            return result
         except ComputerUnavailable as exc:
             return {"error": str(exc)}
         except Exception as exc:
@@ -93,9 +195,9 @@ def tools_for(task: AgentTask, computer: TaskComputer | None = None):
 
     @tool
     async def run_python(code: str) -> dict:
-        """Run Python in this task's persistent Daytona sandbox (30s limit). Never executes on the host.
+        """Run Python on your Daytona computer for this channel (30s limit). Never executes on the host.
 
-        Files persist across calls/retries; Python variables do not. Requires DAYTONA_API_KEY.
+        Files persist across calls and later tasks; Python variables do not. Requires DAYTONA_API_KEY.
         """
         return await computer_call(lambda: computer.command(code, python=True))
 
@@ -161,5 +263,6 @@ def tools_for(task: AgentTask, computer: TaskComputer | None = None):
         """
         return await computer_call(lambda: computer.export_file(path))
 
-    return [recall_memory, remember, channel_history, web_search, run_python, sandbox_exec,
+    return [recall_memory, remember, channel_history, web_search, fetch_page, ask_teammate, request_approval,
+            schedule_task, list_schedules, cancel_schedule, run_python, sandbox_exec,
             computer_screenshot, computer_open_browser, computer_action, sandbox_write_file, sandbox_export_file]

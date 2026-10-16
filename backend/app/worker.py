@@ -1,4 +1,4 @@
-"""Run separately: uv run python -m app.worker (one worker per checkpoint file)."""
+"""Run separately: uv run python -m app.worker (one worker per checkpoint file, several tasks at once)."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from band.client.rest import AsyncRestClient, ChatMessageRequest, ChatMessageRequestMentionsItem, aclose_rest_client
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command
 from deepagents.backends.utils import file_data_to_string
 from sqlmodel import select
 from sqlalchemy import update
@@ -16,11 +17,45 @@ from sqlalchemy import update
 from app.auth import decrypt_secret
 from app.config import settings
 from app.harness import build_harness
+from app.integrations import integration_tools
 from app.computer import TaskComputer
 from app.models import AgentProfile, AgentTask, Message, db, init_db, utcnow
-from app.tasks import next_task, recover_tasks, update_task
+from app.schedules import fire_due
+from app.tasks import (approval_decisions, await_approval, next_task, queue_report, recover_tasks,
+                       report_target, update_task)
 
 logger = logging.getLogger(__name__)
+
+
+TOOL_LABELS = {
+    "web_search": "Searching the web", "fetch_page": "Reading a web page", "run_python": "Running code",
+    "sandbox_exec": "Running a command", "computer_screenshot": "Looking at the computer screen",
+    "computer_open_browser": "Opening a browser", "computer_action": "Using the computer",
+    "sandbox_write_file": "Writing a file", "sandbox_export_file": "Exporting a file",
+    "channel_history": "Reading the channel", "recall_memory": "Checking memory", "remember": "Saving to memory",
+    "write_todos": "Planning", "request_approval": "Asking for approval", "schedule_task": "Scheduling",
+}
+
+
+class ApprovalRequired(Exception):
+    """The graph paused on request_approval; the task waits without holding a worker slot."""
+
+    def __init__(self, requests: list[tuple[str, dict]]):
+        super().__init__(f"{len(requests)} approval request(s)")
+        self.requests = requests
+
+
+def _requests(snapshot) -> list[tuple[str, dict]]:
+    return [(item.id, item.value if isinstance(item.value, dict) else {"action": str(item.value)})
+            for item in snapshot.interrupts]
+
+
+def describe_call(call: dict) -> str:
+    if call["name"] == "task":
+        return f"Asking the {call['args'].get('subagent_type') or 'general-purpose'} helper"
+    if call["name"] == "ask_teammate":
+        return f"Handing off to {call['args'].get('teammate') or 'a teammate'}"
+    return TOOL_LABELS.get(call["name"], f"Using {call['name']}")
 
 
 def config_for(task: AgentTask) -> dict:
@@ -37,31 +72,42 @@ async def _execute_on_computer(task: AgentTask, checkpointer, *, factory, comput
         profile = session.get(AgentProfile, task.agent_id)
     if profile is None:
         raise ValueError("Agent was deleted before this task could finish")
-    graph = factory(task, profile, checkpointer, computer=computer)
+    extra_tools = await integration_tools(profile.name)
+    graph = factory(task, profile, checkpointer, computer=computer, extra_tools=extra_tools)
     config = config_for(task)
     snapshot = await graph.aget_state(config)
     if snapshot.values and not snapshot.next:
         final = snapshot.values
     else:
         inputs = None if snapshot.values else {"messages": [{"role": "user", "content":
-            f"Recent room context:\n{task.context}\n\nRequest:\n{task.prompt}"}]}
+            f"Current time: {utcnow():%Y-%m-%d %H:%M} UTC\n\nRecent room context:\n{task.context}\n\n"
+            f"Request:\n{task.prompt}"}]}
+        if requests := _requests(snapshot):
+            decisions = approval_decisions([approval_id for approval_id, _ in requests])
+            if decisions is None:
+                raise ApprovalRequired(requests)
+            inputs = Command(resume=decisions)
+        action, step = "", ""
         async for _namespace, update in graph.astream(inputs, config, stream_mode="updates",
                                                      subgraphs=True, durability="sync"):
-            labels = []
+            previous = (action, step)
             for _node, value in update.items():
                 if not isinstance(value, dict):
                     continue
-                if value.get("todos"):
-                    labels.extend(f"{t['status']}: {t['content']}" for t in value["todos"])
+                if todos := value.get("todos"):
+                    current = next((i for i, t in enumerate(todos) if t["status"] == "in_progress"), None)
+                    step = "" if current is None else f"Step {current + 1}/{len(todos)}: {todos[current]['content']}"
                 for message in value.get("messages", []):
                     for call in getattr(message, "tool_calls", []):
-                        detail = call["args"].get("subagent_type", "") if call["name"] == "task" else ""
-                        labels.append(f"Using {call['name']} {detail}".strip())
+                        action = describe_call(call)
                     if getattr(message, "type", "") == "tool":
-                        labels.append(f"Finished {getattr(message, 'name', None) or 'tool'}")
-            if labels:
-                update_task(task.id, progress=" · ".join(labels)[:1000])
-        final = (await graph.aget_state(config)).values
+                        action = "Reviewing results"
+            if (action, step) != previous:
+                update_task(task.id, progress=" · ".join(filter(None, (action, step)))[:1000])
+        snapshot = await graph.aget_state(config)
+        if requests := _requests(snapshot):
+            raise ApprovalRequired(requests)
+        final = snapshot.values
     with db() as session:
         exports = session.get(AgentTask, task.id).artifacts
     combined = {a["path"]: a["content"] for a in exports}
@@ -98,11 +144,17 @@ def complete(task: AgentTask, result: str) -> None:
                 raise ValueError("Agent was deleted")
             key = f"task:{task.id}"
             if not session.exec(select(Message).where(Message.band_message_id == key)).first():
+                # A report-back hand-off answers the requesting agent, which then continues from it.
+                target = report_target(session, task)
+                mentions = [{"type": "agent", "id": target[1].id, "name": target[1].name}] if target else []
                 message = Message(channel_id=task.channel_id, author_type="agent", author_id=task.agent_id,
-                                  author_name=profile.name, content=result, band_message_id=key, to_humans=True)
+                                  author_name=profile.name, content=result, band_message_id=key,
+                                  to_humans=target is None, mentions=mentions)
                 session.add(message)
                 session.flush()
                 session.exec(update(AgentTask).where(AgentTask.id == task.id).values(reply_message_id=message.id))
+                if target:
+                    queue_report(session, task, target[0], profile.name, result)
         else:
             session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running",
                          AgentTask.cancel_requested == True).values(status="cancelled", progress="Cancelled"))
@@ -162,6 +214,8 @@ async def process(task: AgentTask, saver, *, executor=execute) -> None:
                 await asyncio.wait({runner}, timeout=0.5)
             result = await runner
             complete(task, result)
+    except ApprovalRequired as paused:
+        await_approval(task, paused.requests)
     except asyncio.CancelledError:
         runner.cancel()
         await asyncio.gather(runner, return_exceptions=True)
@@ -211,18 +265,50 @@ async def work() -> None:
             session.commit()
         async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
             await saver.setup()
-            logger.info("Deep Agents worker ready")
-            while True:
-                task = next_task()
-                if task:
-                    await process(task, saver)
-                with db() as session:
-                    pending = session.exec(select(AgentTask).where(
-                        AgentTask.status == "completed", AgentTask.delivery_status == "pending")).all()
-                for item in pending:
-                    await deliver(item)
-                if not task:
-                    await asyncio.sleep(0.5)
+            logger.info("Deep Agents worker ready (up to %d concurrent tasks)", settings.worker_concurrency)
+            await run_queue(saver, concurrency=settings.worker_concurrency)
+
+
+async def run_queue(saver, *, concurrency: int, executor=execute, stop_when_idle: bool = False) -> None:
+    """Run up to `concurrency` tasks and deliveries at once; next_task keeps agents ordered per channel.
+
+    On shutdown, running tasks are cancelled and left `running` for recovery, as with a single task.
+    """
+    running: dict[str, asyncio.Task] = {}
+    delivering: dict[str, asyncio.Task] = {}
+    try:
+        while True:
+            try:
+                fire_due()
+            except Exception:
+                logger.exception("Could not queue scheduled tasks")
+            while len(running) < concurrency and (task := next_task()):
+                running[task.id] = asyncio.create_task(process(task, saver, executor=executor),
+                                                       name=f"task-{task.id}")
+            with db() as session:
+                pending = session.exec(select(AgentTask).where(
+                    AgentTask.status == "completed", AgentTask.delivery_status == "pending")).all()
+            for item in pending:
+                if item.id not in delivering:
+                    delivering[item.id] = asyncio.create_task(deliver(item), name=f"deliver-{item.id}")
+            active = [*running.values(), *delivering.values()]
+            if not active:
+                if stop_when_idle:
+                    return
+                await asyncio.sleep(0.5)
+                continue
+            await asyncio.wait(active, timeout=0.5, return_when=asyncio.FIRST_COMPLETED)
+            for group in (running, delivering):
+                for key, job in list(group.items()):
+                    if job.done():
+                        del group[key]
+                        if not job.cancelled() and job.exception():
+                            logger.error("Worker job %s crashed", key, exc_info=job.exception())
+    finally:
+        jobs = [*running.values(), *delivering.values()]
+        for job in jobs:
+            job.cancel()
+        await asyncio.gather(*jobs, return_exceptions=True)
 
 
 if __name__ == "__main__":

@@ -33,10 +33,13 @@ Copy `.env.example` to `.env` in the repository root and configure:
 | `DAYTONA_SNAPSHOT` | Optional desktop-ready snapshot; unset uses Daytona's default environment. |
 | `DAYTONA_API_URL`, `DAYTONA_TARGET` | Optional Daytona endpoint/region overrides. |
 | `DAYTONA_AUTO_STOP_MINUTES` | Cloud idle-stop fallback after a worker crash; default 15. |
-| `DAYTONA_AUTO_DELETE_MINUTES` | Delete a computer after this many continuously stopped minutes; default 1440 (one day). |
+| `DAYTONA_AUTO_DELETE_MINUTES` | Delete a computer after this many continuously stopped minutes; default 10080 (seven days). |
 | `AGENT_CHECKPOINT_PATH` | Checkpoint SQLite file; defaults to `backend/agent_checkpoints.db`. |
 | `AGENT_TASK_TIMEOUT` | Execution time limit per attempt in seconds; default 900. |
 | `AGENT_RECURSION_LIMIT` | Graph step limit per invocation; default 100. |
+| `WORKER_CONCURRENCY` | Tasks the worker runs at once; default 4. Each agent still runs one task at a time per channel. |
+| `DEFAULT_TIMEZONE` | IANA timezone for schedules when the humans don't name one; default `UTC`. |
+| `MCP_CONFIG_PATH` | MCP integrations file; defaults to `backend/mcp_servers.json`. See **Approvals, schedules, and integrations**. |
 
 The application database defaults to `backend/band_slack.db`. Both processes must use the **same environment, database, checkpoint path, and application secret**. Use absolute paths for overrides. Keep both database files on persistent local storage and back them up consistently.
 
@@ -70,6 +73,8 @@ Open http://localhost:5173. Alternatively, run `npm run build` from `frontend/` 
 
 Sign up and mention `@Master` in `#general`. The app creates the default room and Master on Band. Local mentions save jobs atomically with the message; external Band turns also become durable jobs. Jobs stay queued if the worker is stopped, and accepted local tasks can run even when Band is offline. Master can delegate to internal researcher, coder, critic, and computer helpers and returns a combined answer. Create additional **visible teammates** from the sidebar when you want a persistent agent with its own role and memory. Internal helpers are task-scoped and do not register separate Band identities.
 
+Agents can also hand work to visible teammates with `ask_teammate`. The request appears in the channel as agent chatter ("to Writer"), the teammate runs after the requester's turn ends, and by default its answer goes back to the requester as a new task so it can combine results or hand off the next step. With `report_back` off, the teammate answers the humans directly. Each original request allows up to 6 hand-offs. Hand-off requests and report-back answers stay local and are not copied to Band. Cancelling a task does not cancel hand-offs it already made; cancel those from the task panel. The bar above the composer shows each queued or running agent and its current step, updated live over the WebSocket.
+
 The **Agent tasks** panel shows progress, cancellation, resume controls, results, downloadable virtual files, and saved memories. Use **Forget** to remove an incorrect memory; ask the agent to save a corrected fact. Task state refreshes through authenticated polling. The API also forwards worker replies over WebSockets so other channels receive unread updates.
 
 ## Tools, memory, and recovery
@@ -77,6 +82,8 @@ The **Agent tasks** panel shows progress, cancellation, resume controls, results
 - Planning, virtual file management, and specialist delegation use Deep Agents. Virtual files live in checkpoints; they do not expose the server filesystem. Exported task files are limited to 20 files and 200,000 characters total.
 - `channel_history` reads recent messages from the current channel. `recall_memory` and `remember` persist knowledge scoped to the visible agent and channel, with source task IDs and timestamps. This is explicit keyed memory, not semantic search. Specialist helpers can read memory; the parent agent writes it.
 - Web research uses [Exa Search](https://exa.ai/docs/reference/search) with a 30-second timeout, up to five sources, and up to 6,000 text characters per source. Set `EXA_API_KEY`; retrieved text is treated as untrusted source material.
+- `fetch_page` reads one public URL as text through Exa's contents API (up to 20,000 characters) without starting a computer. Exa fetches from its own servers, so private and localhost addresses are not reachable. Agents are instructed to use the cheapest sufficient tool: knowledge, memory, and channel history; then search and page fetch; then code execution; and the Daytona desktop only for logins, forms, interactive pages, or visual checks.
+- Local `@mention` tasks include the channel's last 30 messages (up to 24,000 characters) as untrusted context, like Band turns.
 - Computer and code execution use Daytona; local Docker execution is removed. See **Daytona computer use** below.
 - Each task has its own checkpoint thread. Worker restart requeues interrupted tasks and resumes saved progress. Provider requests have bounded retries; task failures require **Resume**. The parent has a 40-model-call limit per invocation and 120 per task thread; computer helpers have a 30-call limit and other named helpers have a 12-call limit per invocation, in addition to graph/time limits. These are execution limits, not dollar budgets.
 - Local replies are committed with task completion. Band replies get one automatic send attempt: uncertain outcomes are marked `unknown` and are never blindly resent. A local answer remains available even when Band delivery is uncertain. Full local answers may exceed the 8,000-character Band copy.
@@ -98,13 +105,21 @@ Available tools:
 | `sandbox_write_file` | Transfer text into an absolute path in the computer. Virtual draft files are separate from this filesystem. |
 | `sandbox_export_file` | Copy a UTF-8 computer file into downloadable task artifacts, within the existing export limits. |
 
-Each task gets a private, named sandbox. Its identity is stored in a separate `TaskSandbox` table, so existing application tables need no column changes. Reconnecting verifies the task/workspace ownership labels. Worker retry uses the same filesystem; a missing or deleted sandbox is reported rather than silently replaced beneath saved task state. Start a new task when its computer has expired.
+Each agent has one persistent computer per channel, matching the scope of its memory: files, installed tools, and browser logins carry over between tasks in that channel and never cross channels. Its identity is stored in the `TaskSandbox` table and its labels name the workspace, the agent's Band identity, and the channel; reconnecting verifies them. If the computer expired (auto-delete), the next tool call starts a fresh one and tells the agent that earlier files are gone. Deleting an agent forgets its computer records; the cloud computer then auto-stops and auto-deletes.
 
 Desktop operations are serialized. A screenshot ID is consumed **before** each mouse/keyboard action, so a replayed tool call cannot blindly repeat the same input. Another helper or shell command invalidates the prior observation; the agent must take a new screenshot. These guards cover the computer API; arbitrary shell commands still require care with external side effects. Delegate a single GUI workflow at a time.
 
-The worker stops the computer on success, failure, cancellation, and graceful shutdown; files remain available for retry until auto-delete. Set the retention interval for your needs and use the Daytona dashboard to delete computers sooner. An abrupt host crash may leave a computer running until the cloud idle-stop timer. Stopped disk storage can still incur Daytona charges. Internet access follows Daytona organization policies, so some websites may be unavailable. See [Daytona VNC](https://www.daytona.io/docs/en/vnc-access/) for desktop/image prerequisites.
+The worker stops the computer on success, failure, cancellation, and graceful shutdown; files remain for later tasks until auto-delete. Set the retention interval for your needs and use the Daytona dashboard to delete computers sooner. An abrupt host crash may leave a computer running until the cloud idle-stop timer. Stopped disk storage can still incur Daytona charges. Internet access follows Daytona organization policies, so some websites may be unavailable. See [Daytona VNC](https://www.daytona.io/docs/en/vnc-access/) for desktop/image prerequisites.
 
-Screenshots and exported files can contain task data. Desktop inspection requires channel membership and returns `Cache-Control: no-store`; screenshots also persist in task checkpoints. Per-action approval for website submissions, payments, or other external changes is not implemented. Use accounts and tasks appropriate to that access model.
+Screenshots and exported files can contain task data. Desktop inspection requires channel membership and returns `Cache-Control: no-store`; screenshots also persist in task checkpoints. Agents are instructed to request approval before submitting forms, sending messages, payments, or other external changes (see below), but the computer cannot technically block a click; use accounts and tasks appropriate to that access model.
+
+## Approvals, schedules, and integrations
+
+**Approvals.** Agents call `request_approval` before actions with external effects. The task pauses with status `waiting`, posts an "Approval needed" message, and frees its worker slot. Channel members approve or deny in the Agent tasks panel; the task resumes from its checkpoint with the decision, including inside a helper such as the computer helper. Waiting tasks can be cancelled.
+
+**Schedules.** Ask an agent for something later or on a cadence (for example "every weekday at 9am, summarize AI news"). It calls `schedule_task` with `once`, `daily`, `weekdays`, `weekly`, or `interval` (at least 15 minutes) in an IANA timezone (`DEFAULT_TIMEZONE` when unspecified). The worker queues each run as a normal task in that channel. Runs missed while the worker was stopped fire once on restart rather than backfilling. A channel can hold 20 active schedules; cancel them from the task panel or by asking the agent.
+
+**MCP integrations.** Copy `backend/mcp_servers.example.json` to `backend/mcp_servers.json` (git-ignored) and list servers with `stdio`, `streamable_http`, or `sse` transport. Put secrets in `.env` and reference them as `${VAR}`; a server whose variables are unset is skipped. Per server, `approval` is `writes` (default: tools not marked `readOnlyHint` pause for approval), `always`, or `never`, and `agents` optionally limits which agents get its tools. Tools appear to agents as `<server>__<tool>`. The worker loads tools at the start of each task attempt (a 30-second timeout per server; unreachable servers are skipped and logged). If the worker crashes during an approved write, the write may repeat when the task resumes.
 
 ## Validation
 
@@ -123,7 +138,8 @@ Offline tests exercise actual Deep Agents tool calls and helper delegation using
 - `backend/app/main.py`: HTTP/WebSocket routes and built UI hosting.
 - `backend/app/service.py`, `band_org.py`: Band synchronization and visible agent management.
 - `backend/app/agent_runner.py`: lightweight Band listeners that enqueue work.
-- `backend/app/tasks.py`, `worker.py`: durable queue, recovery, execution, and reply delivery.
+- `backend/app/tasks.py`, `worker.py`: durable queue, hand-offs, approvals, recovery, execution, and reply delivery.
+- `backend/app/schedules.py`, `integrations.py`: scheduled requests and MCP integrations.
 - `backend/app/harness.py`, `agent_tools.py`: Deep Agents configuration, helpers, and scoped tools.
 - `backend/app/computer.py`: task-owned Daytona lifecycle, desktop observations/actions, and remote file/command tools.
 - `backend/app/models.py`, `auth.py`: persistence, session authentication, and key encryption.
@@ -132,6 +148,6 @@ Offline tests exercise actual Deep Agents tool calls and helper delegation using
 
 ## Deployment limits
 
-This version supports **one API process and one worker on a shared local filesystem**. An exclusive lock prevents a second worker using the same checkpoint file. Run the worker under a process supervisor for automatic restart. Do not run independent worker replicas or different checkpoint paths against the same queue. Multi-host workers need a transactional leased queue and a shared checkpoint backend before deployment.
+This version supports **one API process and one worker on a shared local filesystem**. The worker runs up to `WORKER_CONCURRENCY` tasks at once, at most one per agent per channel, so messages to the same agent in a channel are answered in order. Parallel tasks multiply concurrent Anthropic requests and can start several Daytona computers at once; lower the setting if you hit rate limits or cost limits. An exclusive lock prevents a second worker using the same checkpoint file. Run the worker under a process supervisor for automatic restart. Do not run independent worker replicas or different checkpoint paths against the same queue. Multi-host workers need a transactional leased queue and a shared checkpoint backend before deployment.
 
-All channels are shared within this single workspace; this is not tenant isolation. Task controls and memory deletion require channel membership. Admin roles, per-user tool approvals, semantic memory retrieval, scheduled tasks, and multi-host execution are not implemented. Secrets and local database/checkpoint files must stay out of Git. Keep `APP_SECRET` stable; changing it invalidates encrypted agent credentials. Deleting a visible agent also requests deletion on Band, including its Band history.
+All channels are shared within this single workspace; this is not tenant isolation. Task controls and memory deletion require channel membership. Admin roles, per-user approval permissions (any channel member can approve), semantic memory retrieval, and multi-host execution are not implemented. Secrets and local database/checkpoint files must stay out of Git. Keep `APP_SECRET` stable; changing it invalidates encrypted agent credentials. Deleting a visible agent also requests deletion on Band, including its Band history.
