@@ -13,7 +13,7 @@ from app.auth import decrypt_secret
 from app.config import settings
 from app.models import AgentProfile, AgentTask, Channel, Message, db
 from sqlmodel import select
-from app.tasks import enqueue
+from app.tasks import display_names, enqueue
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +80,10 @@ class QueuedAgentAdapter(SimpleAdapter):
             f"{getattr(item, 'sender_name', 'participant')}: {getattr(item, 'content', '')}"
             for item in (history or [])[-30:]
         )[-24000:]
+        with db() as session:
+            context, prompt = display_names(session, context), display_names(session, msg.content)
         enqueue(agent_id=self.profile_id, channel_id=channel.id, room_id=room_id,
-                source_id=msg.id, prompt=msg.content, context=context,
+                source_id=msg.id, prompt=prompt, context=context,
                 reply_to=self.reply_to or msg.sender_id)
 
 

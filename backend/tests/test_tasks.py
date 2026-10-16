@@ -416,9 +416,11 @@ def test_handoffs_and_task_activity_reach_websocket(job):
         with client.websocket_connect(f"/ws?token={issue_token(user.id)}") as ws:
             child_id = hand_off(task, teammate=writer.name, request="Live check", report_back=True,
                                 call_id="live")["task_id"]
-            seen_message = seen_activity = False
-            while not (seen_message and seen_activity):
+            seen_message = seen_activity = seen_member = False
+            while not (seen_message and seen_activity and seen_member):
                 event = ws.receive_json()
+                if event["type"] == "channel" and event["channel"]["id"] == task.channel_id:
+                    seen_member = seen_member or writer.id in event["channel"]["agent_ids"]
                 if event["type"] == "message" and event["message"]["content"] == f"@{writer.name} Live check":
                     seen_message = True
                 if event["type"] == "task_activity" and event["task"]["id"] == child_id:
@@ -504,9 +506,10 @@ def test_run_queue_overlaps_agents_and_respects_limits(job):
 def test_report_back_mentions_teammates_still_working(job):
     from app.tasks import hand_off
     task, master, _ = job
+    task = update_task(task.id, reply_to="owner-band-id")
     researcher, writer = teammate("Researcher"), teammate()
     first = hand_off(task, teammate=researcher.name, request="Find facts", report_back=True, call_id="r1")["task_id"]
-    hand_off(task, teammate=writer.name, request="Draft copy", report_back=True, call_id="w1")
+    second = hand_off(task, teammate=writer.name, request="Draft copy", report_back=True, call_id="w1")["task_id"]
     update_task(first, status="running")
     with db() as session:
         child = session.get(AgentTask, first)
@@ -515,6 +518,25 @@ def test_report_back_mentions_teammates_still_working(job):
         follow_up = session.exec(select(AgentTask).where(
             AgentTask.source_key == f"{master.id}:{task.room_id}:report-{first}")).one()
     assert f"Still working on your other hand-offs: {writer.name}." in follow_up.prompt
+    assert follow_up.reply_to == ""  # The interim status is not delivered to Band.
+    update_task(follow_up.id, status="running")
+    complete(follow_up, "Waiting on Writer.")
+    with db() as session:
+        interim = session.exec(select(Message).where(Message.band_message_id == f"task:{follow_up.id}")).one()
+    assert not interim.to_humans
+    update_task(second, status="running")
+    with db() as session:
+        writer_task = session.get(AgentTask, second)
+    complete(writer_task, "Copy drafted")
+    with db() as session:
+        final = session.exec(select(AgentTask).where(
+            AgentTask.source_key == f"{master.id}:{task.room_id}:report-{second}")).one()
+    assert "Still working" not in final.prompt and final.reply_to == "owner-band-id"
+    update_task(final.id, status="running")
+    complete(final, "Here is the combined answer.")
+    with db() as session:
+        answer = session.exec(select(Message).where(Message.band_message_id == f"task:{final.id}")).one()
+    assert answer.to_humans
 
 
 class RecordingModel(ScriptedModel):
@@ -656,3 +678,41 @@ def test_deleting_an_agent_leaves_nothing_for_a_reused_id(job):
         session.commit()
     assert sandbox_record(old_key) is None
     assert TaskComputer(work).key != old_key
+
+
+def test_cancelling_a_waiting_task_closes_its_approval(tmp_path, job):
+    from app.models import TaskApproval
+    task, _, user = job
+    run_attempt(tmp_path, task, ScriptedModel(responses=[approval_call("cancelled-approval")]))
+    with db() as session:
+        approval = session.exec(select(TaskApproval).where(TaskApproval.task_id == task.id)).one()
+    headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
+    with TestClient(app) as client:
+        assert client.post(f"/api/tasks/{task.id}/cancel", headers=headers).json()["status"] == "cancelled"
+        assert client.get(f"/api/channels/{task.channel_id}/approvals", headers=headers).json() == []
+        assert client.post(f"/api/approvals/{approval.id}", json={"approve": True}, headers=headers).status_code == 409
+        with db() as session:
+            closed = session.get(TaskApproval, approval.id)
+            assert closed.status == "denied" and closed.note == "Task cancelled"
+            assert not session.exec(select(Message).where(Message.channel_id == task.channel_id,
+                                    Message.content.startswith("Tester approved"))).first()
+        assert client.post(f"/api/tasks/{task.id}/retry", headers=headers).json()["status"] == "queued"
+    # Resuming a cancelled task tells the agent its request was not approved.
+    model = RecordingModel(responses=[AIMessage(content="Not submitted.")])
+    assert run_attempt(tmp_path, task, model).status == "completed"
+    assert any('"approved": false' in r and "Task cancelled" in r for r in tool_results(model))
+
+
+def test_context_shows_agents_by_display_name_not_band_handle(job):
+    from app.tasks import channel_context
+    task, _, _ = job
+    writer = teammate()
+    with db() as session:
+        stored = session.get(AgentProfile, writer.id)
+        stored.handle = f"owner.sfsu/{writer.name.lower()}"
+        session.add(stored)
+        session.add(Message(channel_id=task.channel_id, author_type="human", author_name="Tester",
+                            content=f"@{stored.handle} draft it, not @{stored.handle}x"))
+        session.commit()
+        context = channel_context(session, task.channel_id)
+    assert f"Tester: @{writer.name} draft it, not @owner.sfsu/{writer.name.lower()}x" in context

@@ -350,6 +350,9 @@ async def cancel_task(task_id: str, user: User = Depends(current_user), session:
                          status=case((idle, "cancelled"), else_=AgentTask.status),
                          progress=case((idle, "Cancelled"), else_="Cancellation requested"),
                          updated_at=utcnow()))
+    # Close the task's open approval requests so their cards disappear and cannot be approved later.
+    session.exec(update(TaskApproval).where(TaskApproval.task_id == task_id, TaskApproval.status == "pending")
+                 .values(status="denied", note="Task cancelled", decided_by=user.display_name, decided_at=utcnow()))
     session.commit()
     session.expire_all()
     return serialize_task(session.get(AgentTask, task_id))
@@ -372,8 +375,9 @@ async def retry_task(task_id: str, user: User = Depends(current_user), session: 
 @app.get("/api/channels/{channel_id}/approvals")
 async def list_approvals(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
     _channel_or_404(session, channel_id)
-    return session.exec(select(TaskApproval).where(TaskApproval.channel_id == channel_id,
-                        TaskApproval.status == "pending").order_by(TaskApproval.created_at)).all()
+    return session.exec(select(TaskApproval).join(AgentTask, AgentTask.id == TaskApproval.task_id).where(
+        TaskApproval.channel_id == channel_id, TaskApproval.status == "pending", AgentTask.status == "waiting")
+        .order_by(TaskApproval.created_at)).all()
 
 
 class DecisionBody(BaseModel):
@@ -391,7 +395,7 @@ async def decide(approval_id: str, body: DecisionBody, user: User = Depends(curr
         raise HTTPException(403, "Join the channel to decide its approvals")
     decided = decide_approval(approval_id, approve=body.approve, decided_by=user.display_name, note=body.note)
     if decided is None:
-        raise HTTPException(409, "This request was already decided")
+        raise HTTPException(409, "This request was already decided or its task is no longer waiting")
     verdict = "approved" if body.approve else "denied"
     await service.system_message(decided.channel_id, f"{user.display_name} {verdict}: {decided.action}"
                                  + (f" ({body.note})" if body.note else ""))

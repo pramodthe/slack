@@ -1,6 +1,7 @@
 """Durable jobs shared by the Band bridge, API, and standalone worker."""
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from sqlalchemy import update
@@ -85,11 +86,19 @@ def next_task() -> AgentTask | None:
         return task
 
 
+def display_names(session, text: str) -> str:
+    """Replace agents' Band handles (e.g. @owner/master) with display names, so agents reply with @Master."""
+    for agent in session.exec(select(AgentProfile)).all():
+        if agent.handle:
+            text = re.sub(rf"@{re.escape(agent.handle)}(?![\w./-])", lambda _: f"@{agent.name}", text, flags=re.I)
+    return text
+
+
 def channel_context(session, channel_id: int) -> str:
     """Recent channel messages, bounded like Band turns; the harness treats them as untrusted."""
     recent = session.exec(select(Message).where(Message.channel_id == channel_id)
                           .order_by(Message.id.desc()).limit(30)).all()
-    return "\n".join(f"{m.author_name}: {m.content}" for m in reversed(recent))[-24000:]
+    return display_names(session, "\n".join(f"{m.author_name}: {m.content}" for m in reversed(recent))[-24000:])
 
 
 def hand_off(task: AgentTask, *, teammate: str, request: str, report_back: bool, call_id: str) -> dict:
@@ -173,17 +182,23 @@ def queue_report(session, task: AgentTask, link: TaskHandoff, teammate_name: str
               f"{teammate_name} answered:\n{result[:20000]}\n\n"
               + (f"The original request was:\n{root.prompt}\n\n" if root else "")
               + (f"Still working on your other hand-offs: {', '.join(sorted(set(waiting)))}. If you need their "
-                 "results, reply with a one-line status; each answer arrives as a new task. Earlier answers "
-                 "are in the room context.\n\n" if waiting else "")
+                 "results, reply with a one-line status; it is shown as agent chatter, not sent to the humans. "
+                 "Each answer arrives as a new task. Earlier answers are in the room context.\n\n" if waiting else "")
               + "Continue the original request: combine the results, hand off the next step, "
                 "or give the humans the final answer.")
+    # While siblings are still working, the requester's reply is an interim status: local chatter, not Band.
     follow_up = AgentTask(id=uuid4().hex, source_key=source_key, channel_id=task.channel_id,
                           agent_id=link.from_agent_id, room_id=task.room_id, prompt=prompt,
                           context=channel_context(session, task.channel_id),
-                          reply_to=parent.reply_to if parent else "")
+                          reply_to="" if waiting or parent is None else parent.reply_to)
     session.add_all([follow_up, TaskHandoff(task_id=follow_up.id, root_task_id=link.root_task_id,
                                             parent_task_id=task.id, from_agent_id=task.agent_id,
-                                            kind="report", report_back=False)])
+                                            kind="interim" if waiting else "report", report_back=False)])
+
+
+def is_interim(session, task: AgentTask) -> bool:
+    link = session.get(TaskHandoff, task.id)
+    return link is not None and link.kind == "interim"
 
 
 def await_approval(task: AgentTask, requests: list[tuple[str, dict]]) -> None:
@@ -222,8 +237,15 @@ def approval_decisions(interrupt_ids: list[str]) -> dict[str, dict] | None:
 
 
 def decide_approval(approval_id: str, *, approve: bool, decided_by: str, note: str = "") -> TaskApproval | None:
-    """Apply a decision once; requeue the task when its last pending request is decided."""
+    """Apply a decision once; requeue the task when its last pending request is decided.
+
+    Only waiting tasks accept decisions, so a cancelled task's request cannot be approved.
+    """
     with db() as session:
+        approval = session.get(TaskApproval, approval_id)
+        task = session.get(AgentTask, approval.task_id) if approval else None
+        if task is None or task.status != "waiting":
+            return None
         claimed = session.exec(update(TaskApproval).where(
             TaskApproval.id == approval_id, TaskApproval.status == "pending").values(
             status="approved" if approve else "denied", decided_by=decided_by, note=note[:2000],

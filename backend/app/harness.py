@@ -92,6 +92,7 @@ def build_harness(task: AgentTask, profile: AgentProfile, checkpointer, *, model
             "Use ask_teammate when a teammate's role fits the work and the humans benefit from seeing the collaboration. "
             "A hand-off runs after your turn ends, so after handing off, end your turn with a one-line status. "
             "Use internal helpers through the task tool for quick private subtasks. Hand off focused work, never the whole job. "
+            "Address people and teammates by display name (for example @Master), never by Band handles. "
             "Only ask_teammate hands off work; @mentions in your reply text do not. Keep effort bounded and state limitations."
         ),
     )

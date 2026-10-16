@@ -33,7 +33,7 @@ Copy `.env.example` to `.env` in the repository root and configure:
 | `DAYTONA_SNAPSHOT` | Optional desktop-ready snapshot; unset uses Daytona's default environment. |
 | `DAYTONA_API_URL`, `DAYTONA_TARGET` | Optional Daytona endpoint/region overrides. |
 | `DAYTONA_AUTO_STOP_MINUTES` | Cloud idle-stop fallback after a worker crash; default 15. |
-| `DAYTONA_AUTO_DELETE_MINUTES` | Delete a computer after this many continuously stopped minutes; default 10080 (seven days). |
+| `DAYTONA_AUTO_DELETE_MINUTES` | Delete a computer after this many continuously stopped minutes; default 10080 (seven days). Stopped computers keep their disks, one per agent per channel, and count against Daytona storage: on Tier 1/2 (for example 30 GiB total), use 1440 or less. When the quota is reached, agents get a clear "storage or quota limit reached" message. |
 | `AGENT_CHECKPOINT_PATH` | Checkpoint SQLite file; defaults to `backend/agent_checkpoints.db`. |
 | `AGENT_TASK_TIMEOUT` | Execution time limit per attempt in seconds; default 900. |
 | `AGENT_RECURSION_LIMIT` | Graph step limit per invocation; default 100. |

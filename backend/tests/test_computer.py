@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from daytona import DaytonaNotFoundError
+from daytona import DaytonaForbiddenError, DaytonaNotFoundError, DaytonaRateLimitError
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -361,3 +361,18 @@ def test_cleanup_recovers_computer_when_graph_already_finished(desktop_job):
     sandbox.stop.assert_awaited_once_with(timeout=20)
     sandbox.start.assert_not_awaited()
     assert sandbox_record(computer.key).status == "stopped"
+
+
+def test_quota_failures_explain_storage_limits(desktop_job):
+    _, _, _, computer, client, _ = desktop_job
+    client.create.side_effect = DaytonaForbiddenError("Total disk quota exceeded", 403)
+    async def scenario():
+        async with computer:
+            with pytest.raises(ComputerUnavailable, match="storage or quota limit reached"):
+                await computer.screenshot()
+        client.create.side_effect = DaytonaRateLimitError("Rate limit exceeded", 429)
+        retry = TaskComputer(computer.task, client_factory=lambda config: client)
+        async with retry:
+            with pytest.raises(DaytonaRateLimitError):  # Rate limits are not storage problems.
+                await retry.screenshot()
+    asyncio.run(scenario())

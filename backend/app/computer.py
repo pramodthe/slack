@@ -9,7 +9,8 @@ import logging
 import shlex
 from uuid import uuid4
 
-from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaNotFoundError, ScreenshotOptions
+from daytona import (AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaError, DaytonaForbiddenError,
+                     DaytonaNotFoundError, DaytonaRateLimitError, ScreenshotOptions)
 
 from app.config import settings
 from app.models import AgentProfile, AgentTask, TaskSandbox, db, utcnow
@@ -19,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 class ComputerUnavailable(RuntimeError):
     """An actionable message safe to show to the agent and user."""
+
+
+def is_quota_error(exc: Exception) -> bool:
+    """Stopped persistent computers keep their disks, so small Daytona tiers can run out of storage."""
+    if isinstance(exc, DaytonaRateLimitError):
+        return False
+    text = f"{getattr(exc, 'code', '') or ''} {getattr(exc, 'message', '') or ''}".lower()
+    return isinstance(exc, DaytonaForbiddenError) or any(
+        word in text for word in ("quota", "storage", "disk", "limit", "exceed"))
 
 
 def workspace_id() -> str:
@@ -107,11 +117,18 @@ class TaskComputer:
                     self.notice = ("This agent's previous computer in this channel had expired, so a fresh one "
                                    "was started. Files and logins from earlier tasks are gone.")
                 # A cloud timeout after allocation is recovered by the deterministic name on the next attempt.
-                sandbox = await self.client.create(CreateSandboxFromSnapshotParams(
-                    name=record.name, snapshot=settings.daytona_snapshot or None,
-                    labels=self.labels(), public=False, env_vars={},
-                    auto_stop_interval=max(1, settings.daytona_auto_stop),
-                    auto_delete_interval=max(1, settings.daytona_auto_delete)), timeout=60)
+                try:
+                    sandbox = await self.client.create(CreateSandboxFromSnapshotParams(
+                        name=record.name, snapshot=settings.daytona_snapshot or None,
+                        labels=self.labels(), public=False, env_vars={},
+                        auto_stop_interval=max(1, settings.daytona_auto_stop),
+                        auto_delete_interval=max(1, settings.daytona_auto_delete)), timeout=60)
+                except DaytonaError as exc:
+                    if is_quota_error(exc):
+                        raise ComputerUnavailable(
+                            "Daytona storage or quota limit reached, so a new computer could not be created. "
+                            "Delete old computers in the Daytona dashboard or lower DAYTONA_AUTO_DELETE_MINUTES.") from None
+                    raise
             if any((sandbox.labels or {}).get(key) != value for key, value in self.labels().items()):
                 raise ComputerUnavailable("Sandbox ownership did not match this agent and channel. Refusing to attach.")
             # Save identity before start; cancellation/restart can reattach without recreating it.

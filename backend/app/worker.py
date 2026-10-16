@@ -21,7 +21,7 @@ from app.integrations import integration_tools
 from app.computer import TaskComputer
 from app.models import AgentProfile, AgentTask, Message, db, init_db, utcnow
 from app.schedules import fire_due
-from app.tasks import (approval_decisions, await_approval, next_task, queue_report, recover_tasks,
+from app.tasks import (approval_decisions, await_approval, is_interim, next_task, queue_report, recover_tasks,
                        report_target, update_task)
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ def complete(task: AgentTask, result: str) -> None:
                 mentions = [{"type": "agent", "id": target[1].id, "name": target[1].name}] if target else []
                 message = Message(channel_id=task.channel_id, author_type="agent", author_id=task.agent_id,
                                   author_name=profile.name, content=result, band_message_id=key,
-                                  to_humans=target is None, mentions=mentions)
+                                  to_humans=target is None and not is_interim(session, task), mentions=mentions)
                 session.add(message)
                 session.flush()
                 session.exec(update(AgentTask).where(AgentTask.id == task.id).values(reply_message_id=message.id))

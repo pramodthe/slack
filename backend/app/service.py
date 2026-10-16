@@ -121,6 +121,9 @@ class AppService:
                 for message in sorted(messages, key=lambda m: m.id):
                     await bus.publish({"type": "message", "message": serialize_message(message)})
                     after_id = message.id
+                # The worker adds hand-off teammates as channel members; refresh member lists once per channel.
+                for channel_id in {m.channel_id for m in messages if (m.band_message_id or "").startswith("handoff:")}:
+                    await self.publish_channel(channel_id)
                 current = {t.id: {"id": t.id, "channel_id": t.channel_id, "agent_id": t.agent_id,
                                   "status": t.status, "progress": t.progress} for t in working}
                 for task_id, info in current.items():
