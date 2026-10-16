@@ -92,7 +92,11 @@ The **Agent tasks** panel shows progress, cancellation, resume controls, results
 
 1. Add `DAYTONA_API_KEY` from [Daytona API Keys](https://app.daytona.io/dashboard/keys) to `.env`, then restart API and worker. No credentials are copied into the sandbox. No cloud resources are created until a computer/code tool is actually called.
 2. Leave `DAYTONA_SNAPSHOT` unset for the default desktop-ready environment. Custom snapshots need the desktop/VNC stack and Chromium or Firefox. The configured model must accept images. See [Daytona Computer Use](https://www.daytona.io/docs/en/computer-use/).
-3. Try: `@Master use the computer to open https://example.com, inspect the page, and report what you see.` Master delegates desktop work to its computer helper. The **Computer** button in the task panel shows the latest observed screen. The Daytona dashboard link lets channel members locate that sandbox and choose **VNC** to watch its live desktop. The app panel is a screenshot viewer, not a live VNC stream.
+3. Try: `@Master use the computer to open https://example.com, inspect the page, and report what you see.` Master delegates desktop work to its computer helper. The **Computer** button in the task panel opens the agent's computer for that channel:
+   - **Live** embeds the desktop (Daytona's noVNC on port 6080) through a signed link valid for 15 minutes; use **Reconnect** after it expires. Opening it starts a stopped computer but never creates one. **Take over** gives you the mouse and keyboard and pauses the agent's clicks, typing, commands, and file writes for up to 15 minutes (it can still take screenshots); **Hand back** ends it. Both are announced in the channel.
+   - **Latest screenshot** shows the agent's last observation.
+   - **Files** browses the computer, downloads files, and uploads files (up to 25 MB) to its `uploads` folder; uploads are announced in the channel so the agent knows where they are.
+   - **Stop computer** stops it when no task is running there, instead of waiting for the idle timer.
 
 Available tools:
 
@@ -111,7 +115,7 @@ Desktop operations are serialized. A screenshot ID is consumed **before** each m
 
 The worker stops the computer on success, failure, cancellation, and graceful shutdown; files remain for later tasks until auto-delete. Set the retention interval for your needs and use the Daytona dashboard to delete computers sooner. An abrupt host crash may leave a computer running until the cloud idle-stop timer. Stopped disk storage can still incur Daytona charges. Internet access follows Daytona organization policies, so some websites may be unavailable. See [Daytona VNC](https://www.daytona.io/docs/en/vnc-access/) for desktop/image prerequisites.
 
-Screenshots and exported files can contain task data. Desktop inspection requires channel membership and returns `Cache-Control: no-store`; screenshots also persist in task checkpoints. Agents are instructed to request approval before submitting forms, sending messages, payments, or other external changes (see below), but the computer cannot technically block a click; use accounts and tasks appropriate to that access model.
+Screenshots and exported files can contain task data. Desktop inspection, live view, and file access require channel membership and return `Cache-Control: no-store`; screenshots also persist in task checkpoints. The live link carries its access token, and noVNC's view-only mode is a client setting, so any channel member who opens the live view can operate the desktop. **Take over** coordinates people and the agent; it is not an access control. Agents are instructed to request approval before submitting forms, sending messages, payments, or other external changes (see below), but the computer cannot technically block a click; use accounts and tasks appropriate to that access model.
 
 ## Approvals, schedules, and integrations
 

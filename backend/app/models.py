@@ -121,6 +121,14 @@ class TaskHandoff(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ComputerControl(SQLModel, table=True):
+    """A person has taken over an agent's computer; agent input actions wait until it ends."""
+    key: str = Field(primary_key=True)  # computer key, see computer.computer_key
+    user_id: int
+    user_name: str
+    until: datetime
+
+
 class TaskApproval(SQLModel, table=True):
     """An agent action paused for a human decision. The id is the LangGraph interrupt id."""
     id: str = Field(primary_key=True)

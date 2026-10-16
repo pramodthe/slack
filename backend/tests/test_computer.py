@@ -59,7 +59,20 @@ def desktop_job(monkeypatch):
             screenshot=SimpleNamespace(take_compressed=AsyncMock(return_value=SimpleNamespace(screenshot=screen))),
             mouse=SimpleNamespace(click=AsyncMock(), move=AsyncMock(), drag=AsyncMock(), scroll=AsyncMock()),
             keyboard=SimpleNamespace(type=AsyncMock(), press=AsyncMock())),
-        fs=SimpleNamespace(upload_file=AsyncMock()),
+        fs=SimpleNamespace(
+            upload_file=AsyncMock(), create_folder=AsyncMock(),
+            list_files=AsyncMock(return_value=[
+                SimpleNamespace(name="notes.txt", path="/home/daytona/notes.txt", is_dir=False, size=12,
+                                modified_at="2026-10-16T10:00:00Z"),
+                SimpleNamespace(name="Downloads", path="/home/daytona/Downloads", is_dir=True, size=0,
+                                modified_at=None)]),
+            get_file_info=AsyncMock(side_effect=lambda path, **kwargs: SimpleNamespace(
+                is_dir=False, size=12, path=f"/home/daytona/{path}" if not path.startswith("/") else path)),
+            # Like the real SDK, download_file accepts positional arguments only.
+            download_file=AsyncMock(side_effect=lambda *args: b"hello notes")),
+        get_work_dir=AsyncMock(return_value="/home/daytona"),
+        create_signed_preview_url=AsyncMock(return_value=SimpleNamespace(
+            url="https://6080-signedtoken.proxy.example", token="signedtoken")),
         process=SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(exit_code=0,
                                result=json.dumps({"exit_code": 0, "stdout": "2\n", "stderr": ""})))),
         start=AsyncMock(), stop=AsyncMock())
@@ -376,3 +389,115 @@ def test_quota_failures_explain_storage_limits(desktop_job):
             with pytest.raises(DaytonaRateLimitError):  # Rate limits are not storage problems.
                 await retry.screenshot()
     asyncio.run(scenario())
+
+
+
+def test_live_view_signs_novnc_link_without_creating_a_computer(desktop_job):
+    _, _, _, computer, client, sandbox = desktop_job
+    async def scenario():
+        with pytest.raises(ComputerUnavailable, match="no computer in this channel yet"):
+            await computer.live_view()
+        client.create.assert_not_awaited()
+        async with computer:
+            await computer.command("echo setup")  # The agent created its computer earlier.
+        view = await computer.live_view()
+        await computer.detach()
+        assert view["url"] == "https://6080-signedtoken.proxy.example/vnc.html"
+        sandbox.create_signed_preview_url.assert_awaited_once_with(6080, expires_in_seconds=900)
+        sandbox.computer_use.start.assert_awaited()
+    asyncio.run(scenario())
+
+
+def test_human_control_pauses_agent_input_but_not_observation(desktop_job):
+    from app.computer import active_control, release_control, take_control
+    _, _, user, computer, _, sandbox = desktop_job
+    async def scenario():
+        async with computer:
+            token = frame_id(await computer.screenshot())
+            take_control(computer.key, user_id=user.id, user_name="Desktop Tester")
+            assert sandbox_record(computer.key).frame_id == ""  # The person changes the screen.
+            with pytest.raises(ComputerUnavailable, match="Desktop Tester is using this computer"):
+                await computer.action(screen_id=token, action="click", x=5, y=5)
+            with pytest.raises(ComputerUnavailable, match="is using this computer"):
+                await computer.command("rm -rf /tmp/x")
+            with pytest.raises(ComputerUnavailable, match="is using this computer"):
+                await computer.open_browser("https://example.com")
+            await computer.screenshot()  # Watching is still allowed.
+            sandbox.computer_use.mouse.click.assert_not_awaited()
+            release_control(computer.key, user_name="Desktop Tester")
+            assert active_control(computer.key) is None
+            fresh = frame_id(await computer.screenshot())
+            await computer.action(screen_id=fresh, action="click", x=5, y=5)
+            sandbox.computer_use.mouse.click.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+def test_people_can_browse_download_and_upload_files(desktop_job):
+    _, _, _, computer, _, sandbox = desktop_job
+    async def scenario():
+        async with computer:
+            await computer.command("echo setup")
+        entries = await computer.list_files("")
+        assert [e["name"] for e in entries] == ["Downloads", "notes.txt"]  # Folders first.
+        assert await computer.download("/home/daytona/notes.txt") == b"hello notes"
+        path = await computer.upload("..\\..\\secret plan?.pdf", b"%PDF")
+        assert path == "/home/daytona/uploads/secret plan_.pdf"
+        sandbox.fs.upload_file.assert_awaited_with(b"%PDF", "uploads/secret plan_.pdf", timeout=120)
+        sandbox.fs.get_file_info.side_effect = lambda path, **kwargs: SimpleNamespace(is_dir=False, size=26 * 1024 * 1024)
+        with pytest.raises(ComputerUnavailable, match="25 MB"):
+            await computer.download("/home/daytona/huge.bin")
+        with pytest.raises(ComputerUnavailable, match="25 MB"):
+            await computer.upload("big.bin", b"x" * (25 * 1024 * 1024 + 1))
+        await computer.detach()
+    asyncio.run(scenario())
+
+
+def test_live_computer_api_requires_membership_and_coordinates_control(desktop_job, monkeypatch):
+    import app.main as main_module
+    from app.models import Message
+    task, _, user, computer, client, sandbox = desktop_job
+    asyncio.run(_create_computer(computer))
+    monkeypatch.setattr(main_module, "computer_factory", lambda t: TaskComputer(t, client_factory=lambda config: client))
+    with db() as session:
+        outsider = User(username=uuid4().hex, display_name="Outsider", password_hash="unused")
+        session.add(outsider)
+        session.commit()
+        session.refresh(outsider)
+    member = {"Authorization": f"Bearer {issue_token(user.id)}"}
+    base = f"/api/tasks/{task.id}/computer"
+    with TestClient(app) as http:
+        assert http.post(base + "/live", json={}, headers={"Authorization": f"Bearer {issue_token(outsider.id)}"}).status_code == 403
+        view = http.post(base + "/live", json={"control": True}, headers=member)
+        assert view.status_code == 200 and view.headers["cache-control"] == "no-store"
+        assert view.json()["url"].endswith("/vnc.html") and view.json()["control"]["mine"] is True
+        assert http.get(base, headers=member).json()["control"]["user_name"] == "Desktop Tester"
+        assert http.delete(base + "/control", headers=member).status_code == 200
+        assert http.get(base, headers=member).json()["control"] is None
+        assert http.get(base + "/files", headers=member).json()[0]["name"] == "Downloads"
+        download = http.get(base + "/files/download", params={"path": "/home/daytona/notes.txt"}, headers=member)
+        assert download.content == b"hello notes" and 'filename="notes.txt"' in download.headers["content-disposition"]
+        uploaded = http.post(base + "/files", params={"name": "brief.txt"}, content=b"Read me", headers=member)
+        assert uploaded.json()["path"] == "/home/daytona/uploads/brief.txt"
+        with db() as session:
+            notes = [m.content for m in session.exec(select(Message).where(Message.channel_id == task.channel_id))]
+        assert any("took control" in n for n in notes) and any("handed" in n and "back" in n for n in notes)
+        assert any("uploaded brief.txt" in n and "/home/daytona/uploads/brief.txt" in n for n in notes)
+        with db() as session:
+            stored = session.get(AgentTask, task.id)
+            stored.status = "running"
+            session.add(stored)
+            session.commit()
+        assert http.post(base + "/stop", headers=member).status_code == 409
+        with db() as session:
+            stored = session.get(AgentTask, task.id)
+            stored.status = "completed"
+            session.add(stored)
+            session.commit()
+        sandbox.stop.reset_mock()
+        assert http.post(base + "/stop", headers=member).status_code == 200
+        sandbox.stop.assert_awaited_once()
+
+
+async def _create_computer(computer):
+    async with computer:
+        await computer.command("echo setup")
