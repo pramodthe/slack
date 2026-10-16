@@ -1,0 +1,52 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+See also `AGENTS.md` (style/commit conventions) and `README.md` (full env var table, tool behavior, deployment limits).
+
+## Commands
+
+Backend (Python 3.12+, uv) — run from `backend/`:
+
+```bash
+uv sync --locked                                  # install (incl. dev group: pytest)
+uv run uvicorn app.main:app --reload --port 8000  # API + Band listeners
+uv run python -m app.worker                       # durable task worker (separate process, required for agents to answer)
+uv run pytest                                     # full offline suite
+uv run pytest tests/test_tasks.py::test_name -q   # single test
+```
+
+Frontend (Node 20+) — run from `frontend/`:
+
+```bash
+npm ci
+npm run dev     # Vite on :5173, proxies /api and /ws to :8000
+npm run build   # tsc type-check + vite build to dist/ (served by FastAPI if present)
+```
+
+There is no linter/formatter and no frontend test runner; `npm run build` is the frontend check (unused declarations and switch fallthrough fail it).
+
+## Architecture
+
+Three processes share one SQLite app DB (`backend/band_slack.db`) and must share the same `.env` (repo root `.env` is loaded first, then `backend/.env`), especially `APP_SECRET` (encrypts stored Band agent keys):
+
+1. **API** (`main.py` → `api/http.py` → `workspace/service.py`): REST + WebSocket. `service.startup()` syncs Band rooms/agents (`band/org.py`, Band Human API), starts a Band poller, and starts `_watch_task_messages`, which polls the DB for worker-written reply messages and pushes them to clients via the in-process `EventBus` (`workspace/events.py`). The API never runs LLM reasoning.
+2. **Band listeners** (`band/listener.py`, inside the API process): `AgentManager` runs one Band `Agent` per visible agent using `QueuedAgentAdapter`, which only *enqueues* a job (`tasks.enqueue`) and returns. It suppresses Band echoes of app-originated messages (those already enqueued with source id `app-message-<id>`).
+3. **Worker** (`tasks/worker.py`, started with `python -m app.worker`): `run_queue()` runs up to `WORKER_CONCURRENCY` jobs at once, each `next_task()` → `process()` → `execute()` → `complete()`, plus `deliver()` jobs. `next_task()` skips agents already running in the same channel, so each agent stays ordered per channel. Teammate hand-offs (`ask_teammate` → `tasks.hand_off`, linked in `TaskHandoff`) queue the teammate's task; `complete()` queues the report-back follow-up in the same transaction. Holds an exclusive file lock on `<checkpoint>.worker.lock` (only one worker per checkpoint file). On start, `recover_tasks()` requeues `running` tasks and marks in-flight `sending` deliveries as `unknown` (Band replies are never blindly resent).
+
+Key cross-cutting invariants:
+
+- **Durable queue** (`tasks/queue.py`, `AgentTask` in `persistence/models.py`): jobs are deduplicated by `source_key = "{agent_id}:{room_id}:{source_id}"` (unique). Local `@mention` messages create their job in the same transaction as the message.
+- **Checkpointed execution**: each task's LangGraph thread id is the task id; checkpoints live in a separate SQLite file (`AGENT_CHECKPOINT_PATH`, `AsyncSqliteSaver`). `execute()` resumes from existing state rather than re-sending input. Cancellation is cooperative via `cancel_requested` polled every 0.5s; shutdown (`CancelledError`) intentionally leaves tasks `running` for recovery rather than failing them.
+- **Harness** (`runtime/harness.py`): `create_deep_agent` with fixed internal subagents in `runtime/helpers/` (general-purpose, researcher, coder, computer, critic), each with a `ModelCallLimitMiddleware` cap. Role prompts come from `workspace/roles.py`; the model is `ChatAnthropic(profile.model)` unless a `model=` is injected (tests do this). Internal helpers are not Band identities; "visible teammates" are separate `AgentProfile`s with their own Band agent.
+- **Tools** (`runtime/tools/`): `tools_for(task, computer)` builds task-scoped tools (channel history, keyed memory scoped to agent+channel, Exa web search and `fetch_page`, `ask_teammate`, `request_approval`, schedule tools, Daytona tools). Missing API keys yield explicit "unavailable" tool results rather than errors. MCP tools (`runtime/tools/mcp.py`, config at `MCP_CONFIG_PATH`) are loaded per attempt and passed to `build_harness(extra_tools=...)`.
+- **Approvals**: `request_approval` and non-read-only MCP tools call LangGraph `interrupt()`. `execute()` raises `ApprovalRequired`; `process()` records `TaskApproval` rows and sets the task `waiting` (no worker slot). `decide_approval()` requeues it, and `execute()` resumes with `Command(resume={interrupt_id: decision})`.
+- **Schedules** (`tasks/schedules.py`): `Schedule` rows are fired by `fire_due()` in the worker loop; run ids (`schedule-<id>-<run time>`) make firing replay-safe.
+- **Daytona computer** (`computer/desktop.py`): `TaskComputer` is an async context manager per task attempt, but the sandbox persists per agent (Band identity) and channel: `computer_key()` is the `TaskSandbox` key, and labels carry workspace/agent/channel ownership. An expired sandbox is replaced with a notice to the agent. Each GUI action consumes a screenshot `screen_id` to make replayed tool calls safe; the computer is stopped when a task ends. People reach the same computer through `/api/tasks/{id}/computer/*` (live noVNC link, files, stop): those paths use `ensure(create=False)` and `detach()` so viewing never creates or stops a computer, and an active `ComputerControl` row (take over) makes agent input actions raise `ComputerUnavailable`.
+- Raw provider exceptions are kept out of the UI (only the exception type name is stored in `task.error`).
+
+Frontend: React 19 in `frontend/src/` (entry `main.tsx`; `main.ts`, `counter.ts`, `style.css` are unused Vite template leftovers). Shared API types are in `types.ts`, fetch helpers in `api.ts`, state in `store.ts`. Task state is refreshed by polling; messages/channel/band-status updates arrive over `/ws`.
+
+## Testing
+
+`tests/conftest.py` points `DATABASE_URL` at a temp SQLite file and blanks `BAND_USER_API_KEY`, `ANTHROPIC_API_KEY`, `DAYTONA_API_KEY`, and `EXA_API_KEY`. Keep tests offline: agent runs use `ScriptedModel` (`tests/test_tasks.py`) injected into the real Deep Agents harness, and computer tests use a fake Daytona SDK (`tests/test_computer.py`). Because `settings` is a frozen dataclass read at import time, env overrides must happen before `app` modules are imported (as conftest does).

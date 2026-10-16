@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-import app.agent_tools as module
-from app.agent_tools import tools_for
-from app.models import AgentTask
+import app.runtime.tools.web as module
+from app.runtime.tools import tools_for
+from app.persistence.models import AgentTask
 
 
 def search_tool():

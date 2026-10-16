@@ -16,15 +16,15 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqlmodel import select
 
-import app.computer as computer_module
-from app.agent_tools import tools_for
+import app.computer.desktop as computer_module
+from app.runtime.tools import tools_for
 from app.auth import encrypt_secret, issue_token
 from app.computer import ComputerUnavailable, TaskComputer, sandbox_record, save_sandbox
-from app.harness import build_harness
+from app.runtime.harness import build_harness
 from app.main import app
-from app.models import AgentProfile, AgentTask, Channel, ChannelMember, User, db, init_db
+from app.persistence.models import AgentProfile, AgentTask, Channel, ChannelMember, User, db, init_db
 from app.tasks import enqueue
-from app.worker import execute
+from app.tasks.worker import execute
 from test_tasks import ScriptedModel
 
 
@@ -472,8 +472,8 @@ def test_people_can_browse_download_and_upload_files(desktop_job):
 
 
 def test_live_computer_api_requires_membership_and_coordinates_control(desktop_job, monkeypatch):
-    import app.main as main_module
-    from app.models import Message
+    import app.api.http as main_module
+    from app.persistence.models import Message
     task, _, user, computer, client, sandbox = desktop_job
     asyncio.run(_create_computer(computer))
     monkeypatch.setattr(main_module, "computer_factory", lambda t: TaskComputer(t, client_factory=lambda config: client))

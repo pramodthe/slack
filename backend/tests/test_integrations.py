@@ -11,9 +11,9 @@ import pytest
 from langchain_core.messages import AIMessage
 from sqlmodel import select
 
-import app.integrations as integrations
-from app.integrations import integration_tools, load_servers
-from app.models import TaskApproval, db
+import app.runtime.tools.mcp as integrations
+from app.runtime.tools.mcp import integration_tools, load_servers
+from app.persistence.models import TaskApproval, db
 from app.tasks import decide_approval
 from test_tasks import RecordingModel, ScriptedModel, job, run_attempt  # noqa: F401  (job is a fixture)
 

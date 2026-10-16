@@ -139,14 +139,13 @@ Offline tests exercise actual Deep Agents tool calls and helper delegation using
 
 ## Project layout
 
-- `backend/app/main.py`: HTTP/WebSocket routes and built UI hosting.
-- `backend/app/service.py`, `band_org.py`: Band synchronization and visible agent management.
-- `backend/app/agent_runner.py`: lightweight Band listeners that enqueue work.
-- `backend/app/tasks.py`, `worker.py`: durable queue, hand-offs, approvals, recovery, execution, and reply delivery.
-- `backend/app/schedules.py`, `integrations.py`: scheduled requests and MCP integrations.
-- `backend/app/harness.py`, `agent_tools.py`: Deep Agents configuration, helpers, and scoped tools.
-- `backend/app/computer.py`: task-owned Daytona lifecycle, desktop observations/actions, and remote file/command tools.
-- `backend/app/models.py`, `auth.py`: persistence, session authentication, and key encryption.
+- `backend/app/main.py`: ASGI entry (`uvicorn app.main:app`). Routes live in `backend/app/api/http.py`.
+- `backend/app/workspace/`: channels, messages, and the agent profiles people create (`service.py`, `roles.py`, `events.py`).
+- `backend/app/band/`: Band registration (`org.py`) and the listener that only enqueues (`listener.py`).
+- `backend/app/tasks/`: durable queue, hand-offs, approvals (`queue.py`), schedules (`schedules.py`), and the worker (`worker.py`, started with `python -m app.worker`).
+- `backend/app/runtime/harness.py`: builds one Deep Agent per task. Helpers are `runtime/helpers/`. Tools are `runtime/tools/` (memory, channel, web, teammates, schedules, approvals, computer, and MCP).
+- `backend/app/computer/`: Daytona desktop lifecycle, observations, actions, and files.
+- `backend/app/persistence/models.py`, `backend/app/auth.py`: database models, session authentication, and key encryption.
 - `backend/tests/`: offline regression tests.
 - `frontend/src/`: React workspace and task controls.
 

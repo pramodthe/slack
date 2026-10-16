@@ -4,7 +4,7 @@
 
 Band Slack combines a FastAPI/SQLModel backend with a React/TypeScript frontend and Band-powered agents.
 
-- `backend/app/`: `main.py` defines REST/WebSocket endpoints and serves the built UI; `service.py` coordinates channels, agents, and messages; `band_org.py` wraps Band's Human API; `agent_runner.py` runs agents. Authentication, configuration, models, and role templates have separate modules.
+- `backend/app/`: `main.py` is the ASGI entry; `api/http.py` defines REST/WebSocket endpoints and serves the built UI; `workspace/service.py` coordinates channels, agents, and messages; `band/org.py` wraps Band's Human API; `band/listener.py` enqueues agent work. Authentication and configuration stay at the package root. Models live in `persistence/`. The per-task Deep Agent lives in `runtime/` (helpers and tools in their own folders). The queue and worker live in `tasks/`. The Daytona desktop lives in `computer/`.
 - `backend/tests/`: pytest tests for API flows, service behavior, and role adapters.
 - `frontend/src/`: React components in `components/`, shared types in `types.ts`, API helpers in `api.ts`, and state in `store.ts`.
 - `frontend/public/`: static assets; `frontend/dist/`: generated production UI.

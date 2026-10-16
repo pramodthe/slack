@@ -9,8 +9,8 @@ from sqlmodel import select
 
 from app.auth import issue_token
 from app.main import app
-from app.models import AgentTask, Schedule, db
-from app.schedules import MAX_SCHEDULES_PER_CHANNEL, ScheduleError, create_schedule, fire_due, next_run
+from app.persistence.models import AgentTask, Schedule, db
+from app.tasks.schedules import MAX_SCHEDULES_PER_CHANNEL, ScheduleError, create_schedule, fire_due, next_run
 from test_tasks import job  # noqa: F401  (fixture)
 
 UTC = timezone.utc
@@ -59,7 +59,7 @@ def test_invalid_schedules_are_explained(job, kwargs, message):
 
 
 def test_tool_creates_schedule_once_and_limits_per_channel(job):
-    from app.agent_tools import tools_for
+    from app.runtime.tools import tools_for
     task, _, _ = job
     tool = next(t for t in tools_for(task) if t.name == "schedule_task")
     call = {"type": "tool_call", "name": "schedule_task", "id": "sched-1", "args": {

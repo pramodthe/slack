@@ -6,9 +6,9 @@ import time
 from fastapi.testclient import TestClient
 
 from app.auth import encrypt_secret
-from app.events import EventBus
+from app.workspace.events import EventBus
 from app.main import app
-from app.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, db
+from app.persistence.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, db
 
 
 def _signup(client: TestClient, username: str, name: str) -> dict:

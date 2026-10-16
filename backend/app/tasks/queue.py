@@ -8,7 +8,7 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from app.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, TaskApproval, TaskHandoff, db,
+from app.persistence.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, TaskApproval, TaskHandoff, db,
                         utcnow)
 
 # Teammate hand-offs allowed per original request; each also yields at most one report back.

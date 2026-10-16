@@ -9,14 +9,14 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from app.agent_runner import AgentManager, describe_error, fetch_identity
+from app.band.listener import AgentManager, describe_error, fetch_identity
 from app.auth import encrypt_secret
-from app.band_org import BandOrg
+from app.band.org import BandOrg
 from app.config import settings
-from app.events import bus
-from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message, Schedule,
+from app.workspace.events import bus
+from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message, Schedule,
                         TaskSandbox, User, db, dm_owner)
-from app.roles import MASTER_ROLE, ROLES, role_label
+from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context
 
 logger = logging.getLogger(__name__)
