@@ -1,5 +1,6 @@
 # secrets
 .env
+backend/mcp_servers.json
 agent_config.yaml
 
 # python

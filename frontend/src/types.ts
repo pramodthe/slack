@@ -52,6 +52,14 @@ export interface Message {
   created_at: string;
 }
 
+export interface TaskActivity {
+  id: string;
+  channel_id: number;
+  agent_id: number;
+  status: "queued" | "running" | "waiting" | "done";
+  progress: string;
+}
+
 export interface Role {
   id: string;
   label: string;
@@ -92,4 +100,5 @@ export type ServerEvent =
   | { type: "agent_deleted"; agent_id: number }
   | { type: "agent_status"; agent_id: number; status: AgentStatus }
   | { type: "typing"; channel_id: number; agent_id: number; active: boolean }
-  | { type: "band_status"; band: BandStatus };
+  | { type: "band_status"; band: BandStatus }
+  | { type: "task_activity"; task: TaskActivity };

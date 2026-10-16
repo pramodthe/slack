@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from daytona import DaytonaNotFoundError
+from daytona import DaytonaForbiddenError, DaytonaNotFoundError, DaytonaRateLimitError
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -97,9 +97,9 @@ def test_computer_create_observe_act_and_stop(desktop_job):
             assert params.public is False
             assert params.env_vars == {}
             assert params.auto_stop_interval > 0 and params.auto_delete_interval > 0
-            assert sandbox_record(task.id).sandbox_id == sandbox.id
-        assert sandbox_record(task.id).status == "stopped"
-        assert sandbox_record(task.id).latest_image
+            assert sandbox_record(computer.key).sandbox_id == sandbox.id
+        assert sandbox_record(computer.key).status == "stopped"
+        assert sandbox_record(computer.key).latest_image
         sandbox.stop.assert_awaited_once()
         client.close.assert_awaited_once()
     asyncio.run(scenario())
@@ -113,7 +113,7 @@ def test_screen_replay_and_ambiguous_click_do_not_repeat_input(desktop_job):
             sandbox.computer_use.mouse.click.side_effect = TimeoutError("response lost")
             with pytest.raises(TimeoutError):
                 await computer.action(screen_id=token, action="click", x=20, y=20)
-            assert sandbox_record(task.id).frame_id == ""
+            assert sandbox_record(computer.key).frame_id == ""
             with pytest.raises(ComputerUnavailable, match="already attempted"):
                 await computer.action(screen_id=token, action="click", x=20, y=20)
             assert sandbox.computer_use.mouse.click.await_count == 1
@@ -150,32 +150,62 @@ def test_restart_reattaches_stopped_computer_without_creation(desktop_job):
 
 def test_uncertain_create_recovers_by_persisted_name(desktop_job):
     task, _, _, computer, client, sandbox = desktop_job
-    save_sandbox(task.id)  # Worker crashed after cloud allocation, before saving its returned ID.
+    save_sandbox(computer.key, name=computer.sandbox_name())  # Crashed after allocation, before saving the ID.
     sandbox.labels = computer.labels()
     client.allocated = True
     async def scenario():
         async with computer:
             await computer.screenshot()
         client.create.assert_not_awaited()
-        assert client.get.call_args.args[0] == f"band-task-{task.id}"
+        assert client.get.call_args.args[0] == computer.sandbox_name()
     asyncio.run(scenario())
 
 
-def test_missing_or_foreign_sandbox_is_never_silently_replaced(desktop_job):
+def test_expired_computer_is_replaced_with_a_notice_and_foreign_one_refused(desktop_job):
     task, _, _, computer, client, sandbox = desktop_job
-    save_sandbox(task.id, sandbox_id="expired")
+    save_sandbox(computer.key, name=computer.sandbox_name(), sandbox_id="expired", status="stopped")
+    run_python = next(t for t in tools_for(task, computer) if t.name == "run_python")
     async def scenario():
         async with computer:
-            with pytest.raises(ComputerUnavailable, match="expired"):
-                await computer.screenshot()
-            client.create.assert_not_awaited()
-        client.allocated = True
+            result = await run_python.ainvoke({"code": "print(2)"})
+            assert "previous computer in this channel had expired" in result["notice"]
+            assert client.create.await_count == 1
+            assert sandbox_record(computer.key).sandbox_id == sandbox.id
+            assert "notice" not in await run_python.ainvoke({"code": "print(3)"})  # Reported once.
+        sandbox.labels = {**sandbox.labels, "workspace": "someone-else"}
         other = TaskComputer(task, client_factory=lambda config: client)
         async with other:
             with pytest.raises(ComputerUnavailable, match="ownership"):
                 await other.screenshot()
-        sandbox.stop.assert_not_awaited()
+        assert client.create.await_count == 1
     asyncio.run(scenario())
+
+
+def test_computer_persists_per_agent_and_channel(desktop_job):
+    task, agent, _, computer, client, sandbox = desktop_job
+    later = enqueue(agent_id=agent.id, channel_id=task.channel_id, room_id=task.room_id,
+                    source_id=f"later-{task.id}", prompt="Use the same computer")
+    with db() as session:
+        elsewhere_channel = Channel(name=uuid4().hex)
+        session.add(elsewhere_channel)
+        session.commit()
+        session.refresh(elsewhere_channel)
+    elsewhere = enqueue(agent_id=agent.id, channel_id=elsewhere_channel.id, room_id=task.room_id,
+                        source_id=f"elsewhere-{task.id}", prompt="Different channel")
+    async def scenario():
+        async with computer:
+            await computer.command("echo first")
+        sandbox.state = "stopped"
+        second = TaskComputer(later, client_factory=lambda config: client)
+        assert second.key == computer.key
+        async with second:
+            await second.command("echo second")
+        assert client.create.await_count == 1  # Reattached to the same computer, restarted after stop.
+        sandbox.start.assert_awaited_once_with(timeout=60)
+    asyncio.run(scenario())
+    other = TaskComputer(elsewhere, client_factory=lambda config: client)
+    assert other.key != computer.key and other.sandbox_name() != computer.sandbox_name()
+    assert other.labels()["channel"] == str(elsewhere_channel.id)
 
 
 def test_coordinates_checked_and_commands_run_only_remotely(desktop_job):
@@ -276,7 +306,7 @@ def test_cancellation_stops_desktop_and_closes_sdk(desktop_job):
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
-        assert sandbox_record(task.id).status == "stopped"
+        assert sandbox_record(computer.key).status == "stopped"
         sandbox.stop.assert_awaited_once()
         client.close.assert_awaited_once()
     asyncio.run(scenario())
@@ -288,8 +318,8 @@ def test_failed_stop_is_visible_without_losing_task_result(desktop_job):
     async def scenario():
         async with computer:
             await computer.screenshot()
-        assert sandbox_record(task.id).status == "stop_failed"
-        assert "not confirmed" in sandbox_record(task.id).error
+        assert sandbox_record(computer.key).status == "stop_failed"
+        assert "not confirmed" in sandbox_record(computer.key).error
         client.close.assert_awaited_once()
     asyncio.run(scenario())
 
@@ -324,10 +354,25 @@ def test_computer_subagent_can_observe_desktop(tmp_path, desktop_job):
 
 def test_cleanup_recovers_computer_when_graph_already_finished(desktop_job):
     task, _, _, computer, client, sandbox = desktop_job
-    save_sandbox(task.id, sandbox_id=sandbox.id, status="running")
+    save_sandbox(computer.key, sandbox_id=sandbox.id, status="running")
     client.allocated = True
     sandbox.labels = computer.labels()
     asyncio.run(computer.close())
     sandbox.stop.assert_awaited_once_with(timeout=20)
     sandbox.start.assert_not_awaited()
-    assert sandbox_record(task.id).status == "stopped"
+    assert sandbox_record(computer.key).status == "stopped"
+
+
+def test_quota_failures_explain_storage_limits(desktop_job):
+    _, _, _, computer, client, _ = desktop_job
+    client.create.side_effect = DaytonaForbiddenError("Total disk quota exceeded", 403)
+    async def scenario():
+        async with computer:
+            with pytest.raises(ComputerUnavailable, match="storage or quota limit reached"):
+                await computer.screenshot()
+        client.create.side_effect = DaytonaRateLimitError("Rate limit exceeded", 429)
+        retry = TaskComputer(computer.task, client_factory=lambda config: client)
+        async with retry:
+            with pytest.raises(DaytonaRateLimitError):  # Rate limits are not storage problems.
+                await retry.screenshot()
+    asyncio.run(scenario())

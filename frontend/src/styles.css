@@ -569,7 +569,14 @@ code {
 }
 .typing-dots {
   display: inline-flex;
+  flex-shrink: 0;
   gap: 3px;
+}
+.typing-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .typing-dots i {
   width: 5px;
@@ -848,6 +855,8 @@ code {
 .task-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; align-content: flex-start; }
 .task-status { margin-left: 8px; font-size: 11px; text-transform: uppercase; }
 .task-running { color: #1769aa; } .task-completed { color: #218454; } .task-failed { color: #b83232; }
+.approval-card { display: flex; justify-content: space-between; gap: 12px; margin: 8px 0; padding: 10px 12px; border: 1px solid #d9a400; border-radius: 8px; background: rgba(255, 196, 0, 0.08); }
+.task-waiting { color: #9a6b00; }
 .task-result pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
 
 .computer-panel { padding: 4px 0; }

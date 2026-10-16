@@ -1,4 +1,4 @@
-import type { Agent, BandStatus, Bootstrap, Channel, Message, Model, Role, ServerEvent, User } from "./types";
+import type { Agent, BandStatus, Bootstrap, Channel, Message, Model, Role, ServerEvent, TaskActivity, User } from "./types";
 
 export interface State {
   me: User;
@@ -7,6 +7,7 @@ export interface State {
   agents: Record<number, Agent>;
   messages: Record<number, Message[]>;
   typing: Record<number, number[]>;
+  activity: Record<number, Record<string, TaskActivity>>;
   unread: Record<number, number>;
   roles: Role[];
   models: Model[];
@@ -18,6 +19,7 @@ export interface State {
 export type Action =
   | { type: "event"; event: ServerEvent }
   | { type: "messages_loaded"; channelId: number; messages: Message[] }
+  | { type: "tasks_loaded"; channelId: number; tasks: TaskActivity[] }
   | { type: "select_channel"; channelId: number };
 
 const byId = <T extends { id: number }>(items: T[]) => Object.fromEntries(items.map((i) => [i.id, i]));
@@ -31,6 +33,7 @@ export function initialState(boot: Bootstrap): State {
     agents: byId(boot.agents),
     messages: {},
     typing: {},
+    activity: {},
     unread: {},
     roles: boot.roles,
     models: boot.models,
@@ -90,6 +93,13 @@ function applyEvent(state: State, event: ServerEvent): State {
     }
     case "band_status":
       return { ...state, band: event.band };
+    case "task_activity": {
+      const { task } = event;
+      const current = { ...state.activity[task.channel_id] };
+      if (task.status === "done") delete current[task.id];
+      else current[task.id] = task;
+      return { ...state, activity: { ...state.activity, [task.channel_id]: current } };
+    }
   }
 }
 
@@ -102,6 +112,11 @@ export function reducer(state: State, action: Action): State {
         ...state,
         messages: { ...state.messages, [action.channelId]: mergeMessages(state.messages[action.channelId], action.messages) },
       };
+    case "tasks_loaded": {
+      // Polling seeds activity for clients that connected mid-task; WebSocket events keep it live.
+      const active = action.tasks.filter((t) => t.status !== "done");
+      return { ...state, activity: { ...state.activity, [action.channelId]: Object.fromEntries(active.map((t) => [t.id, t])) } };
+    }
     case "select_channel":
       return { ...state, activeChannelId: action.channelId, unread: { ...state.unread, [action.channelId]: 0 } };
   }

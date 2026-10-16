@@ -14,8 +14,10 @@ from app.auth import encrypt_secret
 from app.band_org import BandOrg
 from app.config import settings
 from app.events import bus
-from app.models import AgentTask, AgentProfile, Channel, ChannelMember, Message, User, db
+from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, Message, Schedule, TaskSandbox,
+                        User, db)
 from app.roles import MASTER_ROLE, ROLES, role_label
+from app.tasks import channel_context
 
 logger = logging.getLogger(__name__)
 
@@ -103,19 +105,35 @@ class AppService:
         await self.org.close()
 
     async def _watch_task_messages(self, after_id: int) -> None:
-        """Bridge worker commits into WebSocket updates, including unread channels."""
+        """Bridge worker commits into WebSocket updates: replies, hand-offs, approval requests, and task progress."""
+        active: dict[str, dict[str, Any]] = {}
         while True:
             await asyncio.sleep(0.5)
             try:
                 with db() as session:
                     messages = session.exec(select(Message).join(
                         AgentTask, AgentTask.reply_message_id == Message.id
-                    ).where(Message.id > after_id).order_by(Message.id)).all()
-                for message in messages:
+                    ).where(Message.id > after_id)).all() + session.exec(select(Message).where(
+                        Message.id > after_id, Message.band_message_id.startswith("handoff:")
+                        | Message.band_message_id.startswith("approval:"))).all()
+                    working = session.exec(select(AgentTask).where(
+                        AgentTask.status.in_(["queued", "running", "waiting"]))).all()
+                for message in sorted(messages, key=lambda m: m.id):
                     await bus.publish({"type": "message", "message": serialize_message(message)})
                     after_id = message.id
+                # The worker adds hand-off teammates as channel members; refresh member lists once per channel.
+                for channel_id in {m.channel_id for m in messages if (m.band_message_id or "").startswith("handoff:")}:
+                    await self.publish_channel(channel_id)
+                current = {t.id: {"id": t.id, "channel_id": t.channel_id, "agent_id": t.agent_id,
+                                  "status": t.status, "progress": t.progress} for t in working}
+                for task_id, info in current.items():
+                    if active.get(task_id) != info:
+                        await bus.publish({"type": "task_activity", "task": info})
+                for task_id in active.keys() - current.keys():
+                    await bus.publish({"type": "task_activity", "task": {**active[task_id], "status": "done"}})
+                active = current
             except Exception:
-                logger.exception("Could not publish worker replies")
+                logger.exception("Could not publish worker updates")
 
     def _require_band(self) -> None:
         if not self.org.online:
@@ -356,6 +374,15 @@ class AppService:
             channel_ids = [m.channel_id for m in memberships]
             for member in memberships:
                 session.delete(member)
+            # SQLite may reuse this row id for a future agent; nothing scoped to it may carry over.
+            for memory in session.exec(select(AgentMemory).where(AgentMemory.agent_id == profile.id)).all():
+                session.delete(memory)
+            for schedule in session.exec(select(Schedule).where(Schedule.agent_id == profile.id)).all():
+                schedule.enabled = False
+                session.add(schedule)
+            for record in session.exec(select(TaskSandbox).where(
+                    TaskSandbox.task_id.startswith(f"agent-{profile.band_agent_id}-"))).all():
+                session.delete(record)  # The cloud computer itself auto-stops and auto-deletes.
             session.delete(session.get(AgentProfile, profile.id))
             session.commit()
             rooms = [c.band_room_id for c in session.exec(select(Channel)).all() if c.band_room_id]
@@ -414,6 +441,7 @@ class AppService:
         # Accept the message and its work atomically; Band relay cannot lose an accepted task.
         with db() as session:
             channel = session.get(Channel, channel_id)
+            context = channel_context(session, channel_id) if mentioned_agents else ""
             session.add(message)
             session.flush()
             for agent in mentioned_agents:
@@ -421,7 +449,7 @@ class AppService:
                 session.add(AgentTask(id=uuid4().hex,
                     source_key=f"{agent.id}:{room_id}:app-message-{message.id}",
                     channel_id=channel_id, agent_id=agent.id, room_id=room_id,
-                    prompt=f"**{user.display_name}:** {content}",
+                    prompt=f"**{user.display_name}:** {content}", context=context,
                     reply_to=self.org.owner.id if self.org.owner else ""))
                 if not session.get(ChannelMember, (channel_id, "agent", agent.id)):
                     session.add(ChannelMember(channel_id=channel_id, member_type="agent", member_id=agent.id))

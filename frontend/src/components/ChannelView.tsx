@@ -90,13 +90,20 @@ export default function ChannelView({
   const visible = (messages ?? []).filter((m) => showChatter || !isChatter(m));
   const hiddenCount = (messages?.length ?? 0) - visible.length;
   const typingNames = (state.typing[channel.id] ?? []).map((id) => state.agents[id]?.name).filter(Boolean);
+  const working = [
+    ...typingNames.map((name) => `${name} is working…`),
+    ...Object.values(state.activity[channel.id] ?? {})
+      .filter((t) => state.agents[t.agent_id])
+      .map((t) => `${state.agents[t.agent_id].name}: ${t.status === "queued" ? "waiting for its turn"
+        : t.status === "waiting" ? "waiting for your approval" : t.progress}`),
+  ];
 
   useEffect(() => localStorage.setItem("show-chatter", showChatter ? "1" : "0"), [showChatter]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [visible.length, typingNames.length]);
+  }, [visible.length, working.length]);
 
   const onScroll = () => {
     const el = scroller.current;
@@ -172,14 +179,14 @@ export default function ChannelView({
       <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} />
 
       <div className="typing-bar">
-        {typingNames.length > 0 && (
+        {working.length > 0 && (
           <>
             <span className="typing-dots">
               <i />
               <i />
               <i />
             </span>
-            {typingNames.join(", ")} {typingNames.length === 1 ? "is" : "are"} working…
+            <span className="typing-text">{working.join(" · ")}</span>
           </>
         )}
       </div>

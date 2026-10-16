@@ -1,4 +1,4 @@
-"""Task-owned Daytona computers. No application credentials enter the sandbox."""
+"""Persistent Daytona computers, one per agent per channel. No application credentials enter the sandbox."""
 from __future__ import annotations
 
 import asyncio
@@ -9,10 +9,11 @@ import logging
 import shlex
 from uuid import uuid4
 
-from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaNotFoundError, ScreenshotOptions
+from daytona import (AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaError, DaytonaForbiddenError,
+                     DaytonaNotFoundError, DaytonaRateLimitError, ScreenshotOptions)
 
 from app.config import settings
-from app.models import AgentTask, TaskSandbox, db, utcnow
+from app.models import AgentProfile, AgentTask, TaskSandbox, db, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +22,46 @@ class ComputerUnavailable(RuntimeError):
     """An actionable message safe to show to the agent and user."""
 
 
-def sandbox_record(task_id: str) -> TaskSandbox | None:
-    with db() as session:
-        return session.get(TaskSandbox, task_id)
+def is_quota_error(exc: Exception) -> bool:
+    """Stopped persistent computers keep their disks, so small Daytona tiers can run out of storage."""
+    if isinstance(exc, DaytonaRateLimitError):
+        return False
+    text = f"{getattr(exc, 'code', '') or ''} {getattr(exc, 'message', '') or ''}".lower()
+    return isinstance(exc, DaytonaForbiddenError) or any(
+        word in text for word in ("quota", "storage", "disk", "limit", "exceed"))
 
 
-def save_sandbox(task_id: str, **values) -> TaskSandbox:
+def workspace_id() -> str:
+    return hashlib.sha256(settings.app_secret.encode()).hexdigest()[:16]
+
+
+def computer_owner(task: AgentTask) -> str:
+    """The agent's Band identity. Unlike SQLite row ids, it is never reused after an agent is deleted."""
     with db() as session:
-        row = session.get(TaskSandbox, task_id)
+        agent = session.get(AgentProfile, task.agent_id)
+    return agent.band_agent_id if agent else f"deleted-agent-{task.agent_id}"
+
+
+def computer_key(task: AgentTask) -> str:
+    """Computers persist per agent and channel, matching memory scope; files never cross channels.
+
+    The worker runs one task per agent per channel at a time, so a computer has one user at once.
+    Stored in TaskSandbox.task_id, which predates persistent computers.
+    """
+    return f"agent-{computer_owner(task)}-channel-{task.channel_id}"
+
+
+def sandbox_record(key: str) -> TaskSandbox | None:
+    with db() as session:
+        return session.get(TaskSandbox, key)
+
+
+def save_sandbox(key: str, **values) -> TaskSandbox:
+    with db() as session:
+        row = session.get(TaskSandbox, key)
+        name = values.pop("name", f"band-task-{key}")
         if row is None:
-            row = TaskSandbox(task_id=task_id, name=f"band-task-{task_id}")
+            row = TaskSandbox(task_id=key, name=name)
         for key, value in values.items():
             setattr(row, key, value)
         row.updated_at = utcnow()
@@ -43,7 +74,10 @@ def save_sandbox(task_id: str, **values) -> TaskSandbox:
 class TaskComputer:
     def __init__(self, task: AgentTask, *, client_factory=AsyncDaytona):
         self.task = task
+        self.owner = computer_owner(task)
+        self.key = f"agent-{self.owner}-channel-{task.channel_id}"
         self.client_factory = client_factory
+        self.notice = ""
         self.client = None
         self.sandbox = None
         self.desktop_started = False
@@ -56,8 +90,12 @@ class TaskComputer:
         await self.close()
 
     def labels(self) -> dict[str, str]:
-        workspace = hashlib.sha256(settings.app_secret.encode()).hexdigest()[:16]
-        return {"app": "band-slack", "workspace": workspace, "task": self.task.id}
+        return {"app": "band-slack", "workspace": workspace_id(),
+                "agent": self.owner, "channel": str(self.task.channel_id)}
+
+    def sandbox_name(self) -> str:
+        owner = hashlib.sha256(self.owner.encode()).hexdigest()[:12]
+        return f"band-{workspace_id()[:8]}-{owner}-c{self.task.channel_id}"
 
     async def ensure(self, *, desktop: bool = False):
         """Caller holds lock. Persist a deterministic name before allocating cloud resources."""
@@ -68,30 +106,38 @@ class TaskComputer:
                 self.client = self.client_factory(DaytonaConfig(
                     api_key=settings.daytona_api_key, api_url=settings.daytona_api_url,
                     target=settings.daytona_target or None))
-            record = sandbox_record(self.task.id) or save_sandbox(self.task.id)
-            if record.status == "deleted":
-                raise ComputerUnavailable("This task's computer was deleted. Start a new task for a fresh computer.")
+            record = sandbox_record(self.key) or save_sandbox(self.key, name=self.sandbox_name())
             try:
                 sandbox = await self.client.get(record.sandbox_id or record.name, request_timeout=30)
             except DaytonaNotFoundError:
                 if record.sandbox_id:
-                    save_sandbox(self.task.id, status="missing", frame_id="")
-                    raise ComputerUnavailable("The saved Daytona computer has expired or was removed. Start a new task.")
+                    # Auto-delete removed the old computer. Replace it, and tell the agent its files are gone.
+                    record = save_sandbox(self.key, sandbox_id=None, status="provisioning", frame_id="",
+                                          latest_image="", error=None)
+                    self.notice = ("This agent's previous computer in this channel had expired, so a fresh one "
+                                   "was started. Files and logins from earlier tasks are gone.")
                 # A cloud timeout after allocation is recovered by the deterministic name on the next attempt.
-                sandbox = await self.client.create(CreateSandboxFromSnapshotParams(
-                    name=record.name, snapshot=settings.daytona_snapshot or None,
-                    labels=self.labels(), public=False, env_vars={},
-                    auto_stop_interval=max(1, settings.daytona_auto_stop),
-                    auto_delete_interval=max(1, settings.daytona_auto_delete)), timeout=60)
+                try:
+                    sandbox = await self.client.create(CreateSandboxFromSnapshotParams(
+                        name=record.name, snapshot=settings.daytona_snapshot or None,
+                        labels=self.labels(), public=False, env_vars={},
+                        auto_stop_interval=max(1, settings.daytona_auto_stop),
+                        auto_delete_interval=max(1, settings.daytona_auto_delete)), timeout=60)
+                except DaytonaError as exc:
+                    if is_quota_error(exc):
+                        raise ComputerUnavailable(
+                            "Daytona storage or quota limit reached, so a new computer could not be created. "
+                            "Delete old computers in the Daytona dashboard or lower DAYTONA_AUTO_DELETE_MINUTES.") from None
+                    raise
             if any((sandbox.labels or {}).get(key) != value for key, value in self.labels().items()):
-                raise ComputerUnavailable("Sandbox ownership did not match this task. Refusing to attach.")
+                raise ComputerUnavailable("Sandbox ownership did not match this agent and channel. Refusing to attach.")
             # Save identity before start; cancellation/restart can reattach without recreating it.
-            save_sandbox(self.task.id, sandbox_id=sandbox.id, status="starting", error=None, frame_id="")
+            save_sandbox(self.key, sandbox_id=sandbox.id, status="starting", error=None, frame_id="")
             self.sandbox = sandbox
             state = str(getattr(sandbox.state, "value", sandbox.state))
             if state != "started":
                 await sandbox.start(timeout=60)
-            save_sandbox(self.task.id, status="running")
+            save_sandbox(self.key, status="running")
         if desktop and not self.desktop_started:
             await self.sandbox.computer_use.start(request_timeout=60)
             info = await self.sandbox.computer_use.display.get_info(request_timeout=15)
@@ -100,7 +146,7 @@ class TaskComputer:
                 display = info.displays[0]
             if display is None or not display.width or not display.height:
                 raise ComputerUnavailable("Desktop has no display. Use Daytona's default snapshot or a desktop-ready snapshot.")
-            save_sandbox(self.task.id, width=display.width, height=display.height)
+            save_sandbox(self.key, width=display.width, height=display.height)
             self.desktop_started = True
         return self.sandbox
 
@@ -117,7 +163,7 @@ class TaskComputer:
         except ValueError:
             raise ComputerUnavailable("Daytona returned an invalid screenshot.") from None
         frame = uuid4().hex
-        row = save_sandbox(self.task.id, latest_image=f"data:image/jpeg;base64,{encoded}",
+        row = save_sandbox(self.key, latest_image=f"data:image/jpeg;base64,{encoded}",
                            frame_id=frame, last_action=action, error=None)
         return [
             {"type": "text", "text": json.dumps({"screen_id": frame, "width": row.width,
@@ -137,7 +183,7 @@ class TaskComputer:
                      direction: str = "down", amount: int = 3, seconds: float = 1) -> list[dict]:
         async with self.lock:
             await self.ensure(desktop=True)
-            row = sandbox_record(self.task.id)
+            row = sandbox_record(self.key)
             if not screen_id or screen_id != row.frame_id:
                 raise ComputerUnavailable("Screen changed or this action was already attempted. Take a new screenshot before acting.")
             if action in {"click", "move", "scroll", "drag"}:
@@ -148,7 +194,7 @@ class TaskComputer:
             if action not in {"click", "move", "drag", "scroll", "type", "key", "wait"}:
                 raise ComputerUnavailable("Unsupported computer action")
             # Consume the frame before the remote side effect. A replay after failure cannot repeat a click/type.
-            save_sandbox(self.task.id, frame_id="", last_action=f"Attempting {action}")
+            save_sandbox(self.key, frame_id="", last_action=f"Attempting {action}")
             cu = self.sandbox.computer_use
             if action == "click":
                 await cu.mouse.click(x, y, button, double, request_timeout=20)
@@ -174,7 +220,7 @@ class TaskComputer:
             raise ComputerUnavailable("Use an http:// or https:// browser URL")
         async with self.lock:
             sandbox = await self.ensure(desktop=True)
-            save_sandbox(self.task.id, frame_id="", last_action="Opening browser")
+            save_sandbox(self.key, frame_id="", last_action="Opening browser")
             command = (
                 "export DISPLAY=${DISPLAY:-:0}; "
                 "browser=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true); "
@@ -232,7 +278,7 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
 
         async with self.lock:
             sandbox = await self.ensure()
-            save_sandbox(self.task.id, frame_id="", last_action="Running Python" if python else "Running command")
+            save_sandbox(self.key, frame_id="", last_action="Running Python" if python else "Running command")
             result = await sandbox.process.exec("python3 -c " + shlex.quote(wrapper), timeout=40)
             if result.exit_code != 0:
                 return {"error": "Remote command timed out or failed", "output": (result.result or "")[:12000]}
@@ -243,7 +289,7 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
             raise ComputerUnavailable("Use an absolute sandbox path and content up to 200000 bytes")
         async with self.lock:
             sandbox = await self.ensure()
-            save_sandbox(self.task.id, frame_id="", last_action="Writing file")
+            save_sandbox(self.key, frame_id="", last_action="Writing file")
             await sandbox.fs.upload_file(content.encode(), path, timeout=30)
             return {"path": path, "bytes": len(content.encode())}
 
@@ -277,7 +323,7 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
         # Also recover an allocation made just before a worker crash, even if the graph
         # is already complete and never calls a computer tool on its resumed attempt.
         try:
-            record = sandbox_record(self.task.id)
+            record = sandbox_record(self.key)
             if self.sandbox is None and record and settings.daytona_api_key and record.status in {
                 "running", "starting", "provisioning", "stop_failed"
             }:
@@ -288,24 +334,24 @@ print(json.dumps({{"exit_code": p.returncode, "timed_out": timed_out,
                             target=settings.daytona_target or None))
                     sandbox = await self.client.get(record.sandbox_id or record.name, request_timeout=10)
                     if any((sandbox.labels or {}).get(key) != value for key, value in self.labels().items()):
-                        raise ComputerUnavailable("Sandbox ownership did not match this task")
+                        raise ComputerUnavailable("Sandbox ownership did not match this agent and channel")
                     self.sandbox = sandbox
-                    save_sandbox(self.task.id, sandbox_id=sandbox.id)
+                    save_sandbox(self.key, sandbox_id=sandbox.id)
                 except DaytonaNotFoundError:
-                    save_sandbox(self.task.id, status="missing", frame_id="")
+                    save_sandbox(self.key, status="missing", frame_id="")
                 except Exception:
                     logger.warning("Could not recover task computer %s for cleanup", self.task.id)
-                    save_sandbox(self.task.id, status="stop_failed", frame_id="",
+                    save_sandbox(self.key, status="stop_failed", frame_id="",
                                  error="Cleanup was not confirmed; check Daytona dashboard")
             if self.sandbox is not None:
                 try:
                     state = str(getattr(self.sandbox.state, "value", self.sandbox.state))
                     if state != "stopped":
                         await self.sandbox.stop(timeout=20)
-                    save_sandbox(self.task.id, status="stopped", frame_id="")
+                    save_sandbox(self.key, status="stopped", frame_id="")
                 except Exception:
                     logger.warning("Could not stop task computer %s", self.task.id)
-                    save_sandbox(self.task.id, status="stop_failed", frame_id="",
+                    save_sandbox(self.key, status="stop_failed", frame_id="",
                                  error="Stop was not confirmed; check Daytona dashboard")
         finally:
             if self.client is not None:
