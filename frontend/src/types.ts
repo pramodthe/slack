@@ -12,8 +12,21 @@ export interface Channel {
   band_room_id: string | null;
   human_ids: number[];
   agent_ids: number[];
+  outside_agents: OutsideAgent[];
   is_dm: boolean;
   dm_agent_id: number | null;
+}
+
+export interface OutsideAgent {
+  band_id: string;
+  handle: string;
+  name: string;
+  description: string;
+}
+
+export interface BandPeer extends OutsideAgent {
+  online: boolean;
+  is_external: boolean;
 }
 
 export interface ChannelComputer {
@@ -46,8 +59,8 @@ export interface Agent {
 }
 
 export interface Mention {
-  type: "agent" | "human";
-  id: number;
+  type: "agent" | "human" | "external";
+  id: number | null;
   name: string;
 }
 

@@ -7,6 +7,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.band.listener import AgentManager, describe_error, fetch_identity
@@ -15,9 +16,10 @@ from app.band.org import BandOrg
 from app.config import settings
 from app.workspace.events import bus
 from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
-                                    MessageDraft, Schedule, TaskSandbox, User, db, dm_owner)
+                                    MessageDraft, OutsideAgent, Schedule, TaskSandbox, TeammateRequest, User, db,
+                                    dm_owner)
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
-from app.tasks import channel_context
+from app.tasks import channel_context, display_names
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,15 @@ def serialize_message(message: Message) -> dict[str, Any]:
     }
 
 
+def serialize_outside_agent(outsider: OutsideAgent) -> dict[str, Any]:
+    return {
+        "band_id": outsider.band_id,
+        "handle": outsider.handle,
+        "name": outsider.name,
+        "description": outsider.description,
+    }
+
+
 def _mentioned(content: str, *names: str) -> bool:
     return any(
         name and re.search(rf"@{re.escape(name)}(?![\w-])", content, re.IGNORECASE)
@@ -71,6 +82,7 @@ class AppService:
         self._poll_since: dict[str, datetime] = {}
         self._poller: asyncio.Task | None = None
         self._task_poller: asyncio.Task | None = None
+        self._teammate_poller: asyncio.Task | None = None
         self._dm_lock = asyncio.Lock()
 
     # --- lifecycle ---
@@ -79,6 +91,7 @@ class AppService:
         with db() as session:
             latest = session.exec(select(Message.id).order_by(Message.id.desc()).limit(1)).first() or 0
         self._task_poller = asyncio.create_task(self._watch_task_messages(latest), name="task-messages")
+        self._teammate_poller = asyncio.create_task(self._watch_teammate_requests(), name="teammate-requests")
         await self.org.connect()
         await self._publish_band_status()
         if not self.org.online:
@@ -98,9 +111,10 @@ class AppService:
         self._poller = asyncio.create_task(self._poll_forever(), name="band-poller")
 
     async def shutdown(self) -> None:
-        if self._task_poller is not None:
-            self._task_poller.cancel()
-            await asyncio.gather(self._task_poller, return_exceptions=True)
+        for poller in (self._task_poller, self._teammate_poller):
+            if poller is not None:
+                poller.cancel()
+                await asyncio.gather(poller, return_exceptions=True)
         if self._poller is not None:
             self._poller.cancel()
             await asyncio.gather(self._poller, return_exceptions=True)
@@ -148,6 +162,48 @@ class AppService:
                 active = current
             except Exception:
                 logger.exception("Could not publish worker updates")
+
+    async def _watch_teammate_requests(self) -> None:
+        """Register teammates that agents asked for; the worker can't, since Band registration lives here."""
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                with db() as session:
+                    pending = session.exec(select(TeammateRequest.id).where(
+                        TeammateRequest.status == "pending").order_by(TeammateRequest.id)).all()
+                for request_id in pending:
+                    await self.process_teammate_request(request_id)
+            except Exception:
+                logger.exception("Could not process teammate requests")
+
+    async def process_teammate_request(self, request_id: int) -> None:
+        with db() as session:
+            # Claiming first stops the worker expiring a request whose Band registration is under way.
+            claimed = session.exec(update(TeammateRequest).where(
+                TeammateRequest.id == request_id, TeammateRequest.status == "pending").values(status="creating"))
+            session.commit()
+            request = session.get(TeammateRequest, request_id)
+            requester = session.get(AgentProfile, request.requested_by_agent_id)
+        if not claimed.rowcount:
+            return
+        status, agent_id, error = "failed", None, ""
+        try:
+            profile = await self.create_agent(name=request.name, role=request.role, instructions=request.instructions,
+                                              model=request.model, channel_id=request.channel_id,
+                                              created_by_agent=request.requested_by_agent_id)
+            status, agent_id = "created", profile.id
+        except ServiceError as exc:
+            error = exc.message
+        except Exception as exc:
+            logger.exception("Creating teammate %s failed", request.name)
+            error = type(exc).__name__
+        with db() as session:
+            session.exec(update(TeammateRequest).where(TeammateRequest.id == request_id).values(
+                status=status, agent_id=agent_id, error=error[:500]))
+            session.commit()
+        if status == "created":
+            await self.system_message(request.channel_id, f"{requester.name if requester else 'An agent'} created "
+                                      f"**{profile.name}** ({role_label(profile.role)}) as a teammate in this channel.")
 
     def _require_band(self) -> None:
         if not self.org.online:
@@ -210,6 +266,8 @@ class AppService:
             select(ChannelMember).where(ChannelMember.channel_id == channel.id)
         ).all()
         dm = session.get(DirectMessage, channel.id)
+        outsiders = session.exec(select(OutsideAgent).where(OutsideAgent.channel_id == channel.id)
+                                 .order_by(OutsideAgent.created_at)).all()
         return {
             "id": channel.id,
             "name": channel.name,
@@ -217,6 +275,7 @@ class AppService:
             "band_room_id": channel.band_room_id,
             "human_ids": [m.member_id for m in members if m.member_type == "human"],
             "agent_ids": [m.member_id for m in members if m.member_type == "agent"],
+            "outside_agents": [serialize_outside_agent(o) for o in outsiders],
             "is_dm": dm is not None,
             "dm_agent_id": dm.agent_id if dm else None,
         }
@@ -324,6 +383,71 @@ class AppService:
                 await self.org.remove_participant(room_id, profile.band_agent_id)
             except Exception:
                 logger.exception("Couldn't remove %s from room %s", profile.name, room_id)
+
+    async def list_peers(self, channel_id: int) -> list[dict[str, Any]]:
+        """Band agents outside this app that could be invited to the channel."""
+        self._require_band()
+        with db() as session:
+            channel = session.get(Channel, channel_id)
+            if channel is None or not channel.band_room_id:
+                raise ServiceError("Channel not found", 404)
+            ours = set(session.exec(select(AgentProfile.band_agent_id)).all())
+            invited = set(session.exec(select(OutsideAgent.band_id).where(OutsideAgent.channel_id == channel_id)).all())
+        try:
+            peers = await self.org.agent_peers(channel.band_room_id)
+        except Exception as exc:
+            raise ServiceError(f"Band couldn't list agents: {describe_error(exc)}", 502) from exc
+        return [{
+            "band_id": p.id, "handle": p.handle, "name": p.name, "description": p.description or "",
+            "online": bool(p.online), "is_external": bool(p.is_external),
+        } for p in peers if p.id not in ours and p.id not in invited]
+
+    async def invite_outside_agent(self, user: User, channel_id: int, band_id: str) -> None:
+        self._require_band()
+        with db() as session:
+            channel = session.get(Channel, channel_id)
+            if channel is None or not channel.band_room_id:
+                raise ServiceError("Channel not found", 404)
+            if session.get(OutsideAgent, (channel_id, band_id)):
+                return
+            if session.exec(select(AgentProfile.id).where(AgentProfile.band_agent_id == band_id)).first():
+                raise ServiceError("That agent belongs to this workspace; add it as a teammate instead", 409)
+        peers = await self.list_peers(channel_id)
+        peer = next((p for p in peers if p["band_id"] == band_id), None)
+        if peer is None:
+            raise ServiceError("That Band agent isn't available to invite", 404)
+        with db() as session:
+            # Agents name teammates in ask_teammate, so a name must point at exactly one of them.
+            if session.exec(select(AgentProfile.id).where(AgentProfile.name == peer["name"])).first():
+                raise ServiceError(f"A teammate is already named {peer['name']!r}", 409)
+        try:
+            await self.org.add_participant(channel.band_room_id, band_id)
+        except Exception as exc:
+            raise ServiceError(f"Band couldn't add the agent: {describe_error(exc)}", 502) from exc
+        with db() as session:
+            session.add(OutsideAgent(channel_id=channel_id, band_id=band_id, handle=peer["handle"], name=peer["name"],
+                                     description=peer["description"], added_by=user.id))
+            session.commit()
+        await self.system_message(channel_id, f"{user.display_name} invited the outside Band agent "
+                                  f"**{peer['name']}** (@{peer['handle']}).")
+        await self.publish_channel(channel_id)
+
+    async def remove_outside_agent(self, channel_id: int, band_id: str) -> None:
+        with db() as session:
+            outsider = session.get(OutsideAgent, (channel_id, band_id))
+            if outsider is None:
+                raise ServiceError("That agent isn't in this channel", 404)
+            channel = session.get(Channel, channel_id)
+            name = outsider.name
+            session.delete(outsider)
+            session.commit()
+        if channel.band_room_id and self.org.online:
+            try:
+                await self.org.remove_participant(channel.band_room_id, band_id)
+            except Exception:
+                logger.exception("Couldn't remove %s from room %s", name, channel.band_room_id)
+        await self.system_message(channel_id, f"**{name}** was removed from the channel.")
+        await self.publish_channel(channel_id)
 
     # --- agents ---
 
@@ -663,12 +787,14 @@ class AppService:
                 refs = re.findall(r"@([\w./-]+)", item.content)
                 await self._store_agent_message(channel_id, profile, item.content, refs, item.id)
                 continue
+            with db() as session:
+                content = display_names(session, item.content)
             await self._store(
                 Message(
                     channel_id=channel_id,
                     author_type="external",
                     author_name=item.sender_name or "Band user",
-                    content=self._strip_owner_mentions(item.content),
+                    content=self._strip_owner_mentions(content),
                     band_message_id=item.id,
                 )
             )

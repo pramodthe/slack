@@ -88,8 +88,9 @@ def next_task() -> AgentTask | None:
 
 
 def display_names(session, text: str) -> str:
-    """Replace agents' Band handles (e.g. @owner/master) with display names, so agents reply with @Master."""
+    """Replace agents' Band handles and raw mentions (@owner/master, @[[id]]) with display names, so agents reply with @Master."""
     for agent in session.exec(select(AgentProfile)).all():
+        text = text.replace(f"@[[{agent.band_agent_id}]]", f"@{agent.name}")
         if agent.handle:
             text = re.sub(rf"@{re.escape(agent.handle)}(?![\w./-])", lambda _: f"@{agent.name}", text, flags=re.I)
     return text

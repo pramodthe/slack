@@ -8,7 +8,7 @@ from sqlmodel import select
 
 from app.config import settings
 from app.computer import TaskComputer
-from app.persistence.models import AgentProfile, AgentTask, db
+from app.persistence.models import AgentProfile, AgentTask, OutsideAgent, db
 from app.runtime.helpers.coder import coder
 from app.runtime.helpers.computer import computer as computer_helper
 from app.runtime.helpers.critic import critic
@@ -37,7 +37,13 @@ def build_harness(task: AgentTask, profile: AgentProfile, checkpointer, *, model
     role = MASTER_ROLE if profile.is_master else ROLES.get(profile.role, ROLES["custom"])
     with db() as session:
         teammates = [a for a in session.exec(select(AgentProfile)).all() if a.id != profile.id]
+        outsiders = session.exec(select(OutsideAgent).where(OutsideAgent.channel_id == task.channel_id)).all()
     roster = "; ".join(f"{a.name} ({role_label(a.role)})" for a in teammates) or "none yet"
+    outside_roster = "; ".join(f"{o.name}" + (f" ({o.description[:200]})" if o.description else "") for o in outsiders)
+    recruiting = (
+        "If no visible teammate's role fits focused work the humans should see, create one with create_teammate "
+        "(once; reuse existing teammates), then hand off to it with ask_teammate. "
+        if profile.is_master else "")
     return create_deep_agent(
         model=model, checkpointer=checkpointer, tools=parent_tools, subagents=subagents,
         middleware=[TodoListMiddleware(), ModelCallLimitMiddleware(run_limit=40, thread_limit=120, exit_behavior="error")], name="workspace-agent",
@@ -72,6 +78,9 @@ def build_harness(task: AgentTask, profile: AgentProfile, checkpointer, *, model
             + f"Visible teammates (separate agents with their own role and memory): {roster}. "
             "Use ask_teammate when a teammate's role fits the work and the humans benefit from seeing the collaboration. "
             "A hand-off runs after your turn ends, so after handing off, end your turn with a one-line status. "
+            + recruiting
+            + (f"Outside Band agents in this channel (they run elsewhere, such as Claude Code or Codex; ask_teammate "
+               f"reaches them and they answer in the channel): {outside_roster}. " if outside_roster else "") +
             "Use internal helpers through the task tool for quick private subtasks. Hand off focused work, never the whole job. "
             "Address people and teammates by display name (for example @Master), never by Band handles. "
             "Only ask_teammate hands off work; @mentions in your reply text do not. Keep effort bounded and state limitations."

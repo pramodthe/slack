@@ -138,6 +138,46 @@ class TaskHandoff(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class TeammateRequest(SQLModel, table=True):
+    """An agent asked for a new visible teammate; only the API process can register it on Band."""
+    id: int | None = Field(default=None, primary_key=True)
+    source_key: str = Field(unique=True, index=True)  # requesting task + tool call, for replay-safe creation
+    task_id: str
+    channel_id: int
+    requested_by_agent_id: int
+    name: str
+    role: str
+    instructions: str = ""
+    model: str
+    status: str = Field(default="pending", index=True)  # pending | creating | created | failed
+    agent_id: int | None = None
+    error: str = ""
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class OutsideAgent(SQLModel, table=True):
+    """A Band agent this app doesn't run (e.g. Claude Code or Codex) that people invited into a channel."""
+    channel_id: int = Field(foreign_key="channel.id", primary_key=True)
+    band_id: str = Field(primary_key=True)
+    handle: str
+    name: str
+    description: str = ""
+    added_by: int | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class OutsideHandoff(SQLModel, table=True):
+    """A request an agent posted to an outside agent through Band; sent at most once."""
+    source_key: str = Field(primary_key=True)  # requesting task + tool call
+    task_id: str = Field(index=True)
+    channel_id: int
+    band_id: str
+    request: str
+    status: str = "sending"  # sending | sent | unknown
+    band_message_id: str = ""
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class ComputerControl(SQLModel, table=True):
     """A person has taken over an agent's computer; agent input actions wait until it ends."""
     key: str = Field(primary_key=True)  # computer key, see computer.computer_key

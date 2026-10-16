@@ -34,6 +34,7 @@ class Settings:
     worker_concurrency: int = max(1, int(_env("WORKER_CONCURRENCY", "4")))
     default_timezone: str = _env("DEFAULT_TIMEZONE", "UTC")
     mcp_config_path: str = _env("MCP_CONFIG_PATH", str(BACKEND_DIR / "mcp_servers.json"))
+    max_agent_teammates: int = int(_env("MAX_AGENT_TEAMMATES", "10"))
     fast_code_execution: bool = _env("FAST_CODE_EXECUTION", "on").lower() not in ("0", "off", "false", "no")
     exa_api_key: str = _env("EXA_API_KEY")
     daytona_api_key: str = _env("DAYTONA_API_KEY")

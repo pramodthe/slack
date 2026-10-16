@@ -148,6 +148,13 @@ class BandOrg:
         )
         self._room_members.get(room_id, set()).discard(band_id)
 
+    async def agent_peers(self, room_id: str) -> list:
+        """Band agents the org can add to this room (its own, shared, global, and contacts), minus current members."""
+        response = await self._client().human_api_peers.list_my_peers(
+            not_in_chat=room_id, type="Agent", page_size=100, request_options=DEFAULT_REQUEST_OPTIONS
+        )
+        return list(response.data)
+
     def forget_participant(self, room_id: str, band_id: str) -> None:
         self._room_members.get(room_id, set()).discard(band_id)
 
