@@ -244,6 +244,7 @@ def test_browser_launch_and_file_export_survive_final_result(tmp_path, desktop_j
             browser_command = sandbox.process.exec.call_args.args[0]
             assert "https://example.com" in browser_command
             assert "nohup" in browser_command and "</dev/null" in browser_command
+            assert "--disable-quic" in browser_command
             await computer.write_file("/tmp/report.txt", "Verified result")
             sandbox.fs.upload_file.assert_awaited_once_with(b"Verified result", "/tmp/report.txt", timeout=30)
             sandbox.process.exec.return_value.result = base64.b64encode(b"Verified result").decode()

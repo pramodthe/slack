@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
 import signal
+import sys
 from pathlib import Path
 
 from band.client.rest import AsyncRestClient, ChatMessageRequest, ChatMessageRequestMentionsItem, aclose_rest_client
@@ -176,18 +176,31 @@ async def process(task: AgentTask, saver, *, executor=execute) -> None:
                     error="Time limit reached" if isinstance(exc, TimeoutError) else type(exc).__name__)
 
 
+def _lock_exclusively(lock) -> None:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit("A worker already owns this checkpoint file")
+
+
 async def work() -> None:
     # A supervisor's SIGTERM gets the same cancellation/cleanup path as Ctrl+C.
-    current = asyncio.current_task()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, current.cancel)
+    # Windows event loops don't support signal handlers; Ctrl+C still works there.
+    if sys.platform != "win32":
+        current = asyncio.current_task()
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, current.cancel)
     init_db()
     path = Path(settings.checkpoint_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(str(path) + ".worker.lock", "w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise SystemExit("A worker already owns this checkpoint file")
+        _lock_exclusively(lock)
         recover_tasks()
         # A crash between send and receipt cannot safely be retried.
         with db() as session:
