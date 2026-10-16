@@ -10,12 +10,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
+from sqlalchemy import case, update
 
 from app.auth import current_user, hash_password, issue_token, user_id_from_token, verify_password
 from app.config import FRONTEND_DIST, MODELS, settings
 from app.events import bus
-from app.models import AgentProfile, Channel, ChannelMember, Message, User, db, get_session, init_db
+from app.models import AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, Message, User, db, get_session, init_db, utcnow
 from app.roles import ROLES
+from app.tasks import serialize_task, update_task
+from app.computer import sandbox_record
 from app.service import ServiceError, serialize_message, serialize_user, service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -34,6 +37,7 @@ async def lifespan(_app: FastAPI):
     startup = asyncio.create_task(service.startup())
     yield
     startup.cancel()
+    await asyncio.gather(startup, return_exceptions=True)
     await service.shutdown()
 
 
@@ -280,6 +284,105 @@ async def restart_agent(agent_id: int, _user: User = Depends(current_user), sess
 @app.delete("/api/agents/{agent_id}")
 async def delete_agent(agent_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
     await service.delete_agent(_agent_or_404(session, agent_id))
+    return {"ok": True}
+
+
+# --- durable task controls ---
+
+
+@app.get("/api/channels/{channel_id}/tasks")
+async def list_tasks(channel_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id)
+    rows = session.exec(select(AgentTask).where(AgentTask.channel_id == channel_id)
+                        .order_by(AgentTask.created_at.desc()).limit(30)).all()
+    return [serialize_task(task) for task in rows]
+
+
+def _task_or_404(session: Session, task_id: str) -> AgentTask:
+    task = session.get(AgentTask, task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    return task
+
+
+def _require_task_member(session: Session, task: AgentTask, user: User) -> None:
+    if not session.get(ChannelMember, (task.channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to control its tasks")
+
+
+@app.get("/api/tasks/{task_id}")
+async def task_detail(task_id: str, _user: User = Depends(current_user), session: Session = Depends(get_session)):
+    task = _task_or_404(session, task_id)
+    return {**serialize_task(task), "result": task.result, "artifacts": task.artifacts}
+
+
+@app.get("/api/tasks/{task_id}/computer")
+async def task_computer(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    task = _task_or_404(session, task_id)
+    _require_task_member(session, task, user)
+    row = sandbox_record(task_id)
+    return JSONResponse({
+        "configured": bool(settings.daytona_api_key),
+        "status": row.status if row else "not_started",
+        "sandbox_id": row.sandbox_id if row else None,
+        "image": row.latest_image if row else "",
+        "width": row.width if row else 0,
+        "height": row.height if row else 0,
+        "last_action": row.last_action if row else "",
+        "updated_at": row.updated_at.isoformat() if row else None,
+        "error": row.error if row else None,
+        "dashboard_url": "https://app.daytona.io/dashboard/sandboxes",
+    }, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    task = _task_or_404(session, task_id)
+    _require_task_member(session, task, user)
+    if task.status not in {"queued", "running"}:
+        raise HTTPException(409, "Only queued or running tasks can be cancelled")
+    session.exec(update(AgentTask).where(AgentTask.id == task_id, AgentTask.status.in_(["queued", "running"]))
+                 .values(cancel_requested=True,
+                         status=case((AgentTask.status == "queued", "cancelled"), else_=AgentTask.status),
+                         progress=case((AgentTask.status == "queued", "Cancelled"), else_="Cancellation requested"),
+                         updated_at=utcnow()))
+    session.commit()
+    session.expire_all()
+    return serialize_task(session.get(AgentTask, task_id))
+
+
+@app.post("/api/tasks/{task_id}/retry")
+async def retry_task(task_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    task = _task_or_404(session, task_id)
+    _require_task_member(session, task, user)
+    if task.status not in {"failed", "cancelled"}:
+        raise HTTPException(409, "Only failed or cancelled tasks can be retried")
+    session.exec(update(AgentTask).where(AgentTask.id == task_id, AgentTask.status.in_(["failed", "cancelled"]))
+                 .values(status="queued", cancel_requested=False, error=None,
+                         progress="Queued to resume saved progress", updated_at=utcnow()))
+    session.commit()
+    session.expire_all()
+    return serialize_task(session.get(AgentTask, task_id))
+
+
+@app.get("/api/channels/{channel_id}/agents/{agent_id}/memories")
+async def list_memories(channel_id: int, agent_id: int, _user: User = Depends(current_user),
+                        session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id)
+    return session.exec(select(AgentMemory).where(AgentMemory.agent_id == agent_id,
+                        AgentMemory.channel_id == channel_id)).all()
+
+
+@app.delete("/api/channels/{channel_id}/agents/{agent_id}/memories/{key}")
+async def forget_memory(channel_id: int, agent_id: int, key: str, user: User = Depends(current_user),
+                         session: Session = Depends(get_session)):
+    if not session.get(ChannelMember, (channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to manage its memories")
+    memory = session.get(AgentMemory, (agent_id, channel_id, key))
+    if memory is None:
+        raise HTTPException(404, "Memory not found")
+    session.delete(memory)
+    session.commit()
     return {"ok": True}
 
 

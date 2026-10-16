@@ -14,3 +14,10 @@ frontend/dist/
 
 # test caches
 .pytest_cache/
+
+# Agent runtime and local QA artifacts
+*.db-shm
+*.db-wal
+*.worker.lock
+output/playwright/
+.playwright-cli/

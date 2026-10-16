@@ -64,6 +64,51 @@ class Message(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class AgentTask(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    source_key: str = Field(unique=True, index=True)
+    channel_id: int = Field(index=True)
+    agent_id: int = Field(index=True)
+    room_id: str
+    prompt: str
+    context: str = ""
+    reply_to: str = ""
+    status: str = Field(default="queued", index=True)
+    progress: str = "Waiting for worker"
+    result: str = ""
+    artifacts: list[dict[str, str]] = Field(default_factory=list, sa_column=Column(JSON))
+    error: str | None = None
+    attempts: int = 0
+    cancel_requested: bool = False
+    delivery_status: str = "pending"
+    reply_message_id: int | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class AgentMemory(SQLModel, table=True):
+    agent_id: int = Field(primary_key=True)
+    channel_id: int = Field(primary_key=True)
+    key: str = Field(primary_key=True)
+    content: str
+    source_task_id: str
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class TaskSandbox(SQLModel, table=True):
+    task_id: str = Field(primary_key=True)
+    name: str = Field(unique=True)
+    sandbox_id: str | None = None
+    status: str = "provisioning"
+    latest_image: str = ""
+    frame_id: str = ""
+    width: int = 0
+    height: int = 0
+    last_action: str = ""
+    error: str | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
 

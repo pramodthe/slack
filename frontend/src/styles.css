@@ -839,3 +839,18 @@ code {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* Durable agent tasks */
+.task-panel { margin: 0 24px 8px; padding: 10px 14px; border: 1px solid var(--border, #ddd); border-radius: 8px; max-height: 32vh; overflow: auto; font-size: 13px; }
+.task-panel summary { cursor: pointer; font-weight: 600; }
+.task-panel p { margin: 6px 0; overflow-wrap: anywhere; }
+.task-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border, #ddd); }
+.task-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; align-content: flex-start; }
+.task-status { margin-left: 8px; font-size: 11px; text-transform: uppercase; }
+.task-running { color: #1769aa; } .task-completed { color: #218454; } .task-failed { color: #b83232; }
+.task-result pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
+
+.computer-panel { padding: 4px 0; }
+.computer-status { text-transform: capitalize; }
+.computer-screen { display: block; width: 100%; height: auto; border: 1px solid var(--border, #ddd); border-radius: 6px; background: #181818; }
+.computer-panel code { overflow-wrap: anywhere; }
