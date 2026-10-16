@@ -369,6 +369,27 @@ async def task_computer(task_id: str, user: User = Depends(current_user), sessio
 NO_STORE = {"Cache-Control": "no-store"}
 
 
+@app.get("/api/channels/{channel_id}/computers")
+async def channel_computers(channel_id: int, user: User = Depends(current_user),
+                            session: Session = Depends(get_session)):
+    """Each agent's computer in this channel, without screenshots, so clients can poll it cheaply."""
+    _channel_or_404(session, channel_id, user)
+    computers = []
+    for agent_id in session.exec(select(AgentTask.agent_id).where(AgentTask.channel_id == channel_id).distinct()).all():
+        latest = session.exec(select(AgentTask).where(AgentTask.channel_id == channel_id, AgentTask.agent_id == agent_id)
+                              .order_by(AgentTask.created_at.desc())).first()
+        row = sandbox_record(computer_key(latest))
+        if row is None:
+            continue
+        working = session.exec(select(AgentTask.id).where(AgentTask.channel_id == channel_id,
+                               AgentTask.agent_id == agent_id, AgentTask.status == "running")).first()
+        computers.append({"agent_id": agent_id, "task_id": latest.id, "status": row.status,
+                          "last_action": row.last_action, "updated_at": row.updated_at.isoformat(),
+                          "agent_working": working is not None})
+    computers.sort(key=lambda c: c["updated_at"], reverse=True)
+    return JSONResponse(computers, headers=NO_STORE)
+
+
 def computer_factory(task: AgentTask) -> TaskComputer:
     """Tests replace this to use a fake Daytona client."""
     return TaskComputer(task)

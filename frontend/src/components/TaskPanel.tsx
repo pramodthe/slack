@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import ComputerPanel from "./ComputerPanel";
 import type { State, Action } from "../store";
 import type { Message } from "../types";
 import type { Dispatch } from "react";
+import type { OpenComputer } from "./Workspace";
 
 interface Task {
   id: string;
@@ -24,8 +24,8 @@ interface TaskDetail extends Task {
   artifacts: { path: string; content: string }[];
 }
 
-export default function TaskPanel({ channelId, state, dispatch }: {
-  channelId: number; state: State; dispatch: Dispatch<Action>;
+export default function TaskPanel({ channelId, state, dispatch, openComputer }: {
+  channelId: number; state: State; dispatch: Dispatch<Action>; openComputer: OpenComputer;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -33,7 +33,6 @@ export default function TaskPanel({ channelId, state, dispatch }: {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [computerTask, setComputerTask] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [memory, setMemory] = useState<{ agentId: number; rows: Memory[] } | null>(null);
   const version = useRef("");
@@ -46,7 +45,6 @@ export default function TaskPanel({ channelId, state, dispatch }: {
     setApprovals([]);
     setSchedules([]);
     setDetail(null);
-    setComputerTask(null);
     setMemory(null);
     const poll = async () => {
       try {
@@ -185,7 +183,7 @@ export default function TaskPanel({ channelId, state, dispatch }: {
             {task.delivery_status === "unknown" && <p>Answer saved here. Band delivery could not be confirmed.</p>}
           </div>
           <div className="task-controls">
-            <button className="chip" onClick={() => setComputerTask(task.id)}>Computer</button>
+            <button className="chip" onClick={() => openComputer(task.agent_id, task.id)}>Computer</button>
             <button className="chip" onClick={() => void showMemory(task.agent_id)}>Memory</button>
             {(task.status === "queued" || task.status === "running" || task.status === "waiting") && (
               <button className="chip" disabled={busy === task.id || task.cancel_requested} onClick={() => void control(task.id, "cancel")}>Cancel</button>
@@ -197,7 +195,6 @@ export default function TaskPanel({ channelId, state, dispatch }: {
           </div>
         </div>
       ))}
-      {computerTask && <ComputerPanel key={computerTask} taskId={computerTask} onClose={() => setComputerTask(null)} />}
       {memory && (
         <div className="task-result">
           <button className="chip" onClick={() => setMemory(null)}>Close memory</button>

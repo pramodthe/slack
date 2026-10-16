@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Dispatch } from "react";
 import type { State, Action } from "../store";
-import type { Channel, Message } from "../types";
+import type { Channel, ChannelComputer, Message } from "../types";
 import Avatar from "./Avatar";
 import Composer from "./Composer";
 import TaskPanel from "./TaskPanel";
 import RichText, { MentionNames } from "./RichText";
-import type { Modal } from "./Workspace";
+import type { Modal, OpenComputer } from "./Workspace";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -75,6 +75,9 @@ export default function ChannelView({
   showMembers,
   onToggleMembers,
   openModal,
+  computers,
+  computerOpen,
+  openComputer,
 }: {
   state: State;
   dispatch: Dispatch<Action>;
@@ -82,6 +85,9 @@ export default function ChannelView({
   showMembers: boolean;
   onToggleMembers: () => void;
   openModal: (m: Modal) => void;
+  computers: ChannelComputer[];
+  computerOpen: boolean;
+  openComputer: OpenComputer;
 }) {
   const [showChatter, setShowChatter] = useState(() => localStorage.getItem("show-chatter") !== "0");
   const scroller = useRef<HTMLDivElement>(null);
@@ -139,6 +145,7 @@ export default function ChannelView({
   const agentCount = channel.agent_ids.length;
   const humanCount = channel.human_ids.length;
   const dmAgent = channel.dm_agent_id != null ? state.agents[channel.dm_agent_id] : null;
+  const headerComputer = computers.find((c) => c.agent_working) ?? computers[0];
 
   return (
     <section className="channel">
@@ -164,6 +171,15 @@ export default function ChannelView({
             <input type="checkbox" checked={showChatter} onChange={(e) => setShowChatter(e.target.checked)} />
             Agent chatter
           </label>
+          {headerComputer && !computerOpen && (
+            <button
+              className={`chip ${headerComputer.agent_working ? "computer-chip-live" : ""}`}
+              title="Show the agent's computer"
+              onClick={() => openComputer(headerComputer.agent_id, headerComputer.task_id)}
+            >
+              🖥 Computer{headerComputer.agent_working ? " · live" : ""}
+            </button>
+          )}
           {dmAgent ? (
             <button className="chip" onClick={() => openModal({ kind: "agent", agentId: dmAgent.id })}>
               ⚙ Settings
@@ -208,7 +224,7 @@ export default function ChannelView({
         )}
       </div>
 
-      <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} />
+      <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} openComputer={openComputer} />
 
       <div className="typing-bar">
         {working.length > 0 && (

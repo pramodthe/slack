@@ -278,6 +278,25 @@ def test_computer_endpoint_requires_channel_membership(desktop_job):
         assert "frame_id" not in response.json()
 
 
+def test_channel_lists_agent_computers_without_screenshots(desktop_job):
+    task, agent, user, computer, _, _ = desktop_job
+    url = f"/api/channels/{task.channel_id}/computers"
+    auth = {"Authorization": f"Bearer {issue_token(user.id)}"}
+    with TestClient(app) as client:
+        assert client.get(url, headers=auth).json() == []
+        asyncio.run(computer.screenshot())
+        with db() as session:
+            stored = session.get(AgentTask, task.id)
+            stored.status = "running"
+            session.add(stored)
+            session.commit()
+        [listed] = client.get(url, headers=auth).json()
+    assert listed["agent_id"] == agent.id and listed["task_id"] == task.id
+    assert listed["status"] == "running" and listed["agent_working"] is True
+    assert listed["last_action"] and "image" not in listed
+    asyncio.run(computer.close())
+
+
 def test_browser_launch_and_file_export_survive_final_result(tmp_path, desktop_job):
     task, _, _, computer, _, sandbox = desktop_job
     async def scenario():

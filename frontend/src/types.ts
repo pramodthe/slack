@@ -16,6 +16,15 @@ export interface Channel {
   dm_agent_id: number | null;
 }
 
+export interface ChannelComputer {
+  agent_id: number;
+  task_id: string;
+  status: string;
+  last_action: string;
+  updated_at: string;
+  agent_working: boolean;
+}
+
 export interface AgentStatus {
   state: "starting" | "online" | "stopped" | "error";
   error: string | null;
