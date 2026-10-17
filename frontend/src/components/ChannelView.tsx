@@ -35,7 +35,7 @@ function MessageRow({
 }) {
   const agent = message.author_type === "agent" && message.author_id != null ? state.agents[message.author_id] : null;
   const chatter = isChatter(message);
-  const targets = message.mentions.filter((m) => m.type === "agent").map((m) => m.name);
+  const targets = message.mentions.filter((m) => m.type !== "human").map((m) => m.name);
 
   return (
     <div className={`msg ${compact ? "compact" : ""} ${chatter ? "chatter" : ""} msg-${message.author_type}`}>

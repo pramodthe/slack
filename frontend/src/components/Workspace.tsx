@@ -127,7 +127,7 @@ export default function Workspace({
                 onClose={closeComputer}
               />
             ) : (
-              showMembers && !channel.is_dm && <MembersPanel state={state} channel={channel} openModal={setModal} />
+              showMembers && !channel.is_dm && <MembersPanel key={`members-${channel.id}`} state={state} channel={channel} openModal={setModal} />
             )}
           </div>
         ) : (

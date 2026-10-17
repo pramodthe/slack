@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import type { State } from "../store";
-import type { Channel } from "../types";
+import type { BandPeer, Channel } from "../types";
 import Avatar from "./Avatar";
 import type { Modal } from "./Workspace";
 
@@ -15,12 +15,17 @@ export default function MembersPanel({
   openModal: (m: Modal) => void;
 }) {
   const [error, setError] = useState("");
+  const [peers, setPeers] = useState<BandPeer[] | null>(null);
   const humans = channel.human_ids.map((id) => state.users[id]).filter(Boolean);
   const agents = channel.agent_ids.map((id) => state.agents[id]).filter(Boolean);
   const available = Object.values(state.agents).filter((a) => !channel.agent_ids.includes(a.id));
   const joined = channel.human_ids.includes(state.me.id);
 
   const run = (p: Promise<unknown>) => p.then(() => setError("")).catch((e) => setError((e as Error).message));
+  const loadPeers = () =>
+    run(api<BandPeer[]>("GET", `/api/channels/${channel.id}/peers`).then(setPeers));
+  const invite = (bandId: string) =>
+    run(api("POST", `/api/channels/${channel.id}/outside-agents`, { band_id: bandId }).then(() => setPeers(null)));
 
   return (
     <aside className="members">
@@ -65,6 +70,45 @@ export default function MembersPanel({
           <button className="secondary small-btn" onClick={() => openModal({ kind: "new-agent" })}>
             + Create a new agent
           </button>
+        )}
+      </div>
+
+      <div className="members-section">
+        <div className="members-title">Outside Band agents</div>
+        {channel.outside_agents.length === 0 && (
+          <div className="muted small">Agents running elsewhere on Band (Claude Code, Codex, other apps).</div>
+        )}
+        {channel.outside_agents.map((o) => (
+          <div key={o.band_id} className="member">
+            <Avatar name={o.name} kind="external" size={28} />
+            <span className="member-name static" title={o.description}>
+              {o.name}
+              <span className="muted small">@{o.handle}</span>
+            </span>
+            <button
+              className="icon-btn subtle"
+              title="Remove from channel"
+              onClick={() => run(api("DELETE", `/api/channels/${channel.id}/outside-agents/${encodeURIComponent(o.band_id)}`))}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        {peers === null ? (
+          <button className="link small" onClick={loadPeers} disabled={!channel.band_room_id}>
+            + Invite a Band agent
+          </button>
+        ) : peers.length > 0 ? (
+          <select className="add-select" value="" onChange={(e) => e.target.value && invite(e.target.value)}>
+            <option value="">Choose a Band agent…</option>
+            {peers.map((p) => (
+              <option key={p.band_id} value={p.band_id}>
+                {p.name} (@{p.handle}){p.online ? "" : " · offline"}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="muted small">No other Band agents are available to invite.</div>
         )}
       </div>
 

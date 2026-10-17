@@ -193,6 +193,37 @@ async def remove_channel_agent(
     return {"ok": True}
 
 
+@app.get("/api/channels/{channel_id}/peers")
+async def list_channel_peers(channel_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    return await service.list_peers(channel_id)
+
+
+class OutsideAgentBody(BaseModel):
+    band_id: str = Field(min_length=1, max_length=100)
+
+
+@app.post("/api/channels/{channel_id}/outside-agents")
+async def invite_outside_agent(
+    channel_id: int, body: OutsideAgentBody, user: User = Depends(current_user), session: Session = Depends(get_session)
+):
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    await service.invite_outside_agent(user, channel_id, body.band_id)
+    return {"ok": True}
+
+
+@app.delete("/api/channels/{channel_id}/outside-agents/{band_id}")
+async def remove_outside_agent(
+    channel_id: int, band_id: str, user: User = Depends(current_user), session: Session = Depends(get_session)
+):
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    await service.remove_outside_agent(channel_id, band_id)
+    return {"ok": True}
+
+
 @app.get("/api/channels/{channel_id}/messages")
 async def list_messages(
     channel_id: int,
