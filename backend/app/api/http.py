@@ -24,7 +24,7 @@ from daytona import DaytonaError
 
 from app.computer import (TRANSFER_LIMIT, ComputerUnavailable, TaskComputer, active_control, computer_key,
                           release_control, sandbox_record, take_control)
-from app.workspace.service import ServiceError, serialize_message, serialize_user, service
+from app.workspace.service import ServiceError, components_for, serialize_message, serialize_user, service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 for noisy in ("httpx", "httpx2"):
@@ -237,7 +237,8 @@ async def list_messages(
     if before:
         query = query.where(Message.id < before)
     rows = session.exec(query.order_by(Message.id.desc()).limit(min(limit, 200))).all()
-    return [serialize_message(m) for m in reversed(rows)]
+    components = components_for(session, [m.id for m in rows])
+    return [serialize_message(m, components.get(m.id, ())) for m in reversed(rows)]
 
 
 class MessageBody(BaseModel):

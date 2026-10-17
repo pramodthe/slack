@@ -1,0 +1,45 @@
+/* Tailwind for the Tool UI elements only: no global preflight, and a reset scoped to .tool-ui. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tw-shimmer";
+
+/* Only these files: app class names like "hidden" or "truncate" must not pick up Tailwind utilities. */
+@source "./components/assistant-ui";
+@source "./components/MessageComponents.tsx";
+
+/* The app has no dark theme, so dark: variants only apply under an explicit .dark ancestor. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-background: #fff;
+  --color-popover: #fff;
+  --color-foreground: var(--text);
+  --color-muted-foreground: var(--muted);
+  --color-border: var(--border);
+  --font-mono: "Cascadia Code", Consolas, monospace;
+}
+
+@layer base {
+  .tool-ui,
+  .tool-ui *,
+  .tool-ui ::before,
+  .tool-ui ::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+  }
+  .tool-ui button {
+    background: transparent;
+    color: inherit;
+    font: inherit;
+  }
+  .tool-ui table {
+    border-collapse: collapse;
+    text-indent: 0;
+  }
+  .tool-ui svg {
+    display: block;
+  }
+}

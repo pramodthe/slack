@@ -5,6 +5,7 @@ from app.computer import TaskComputer
 from app.persistence.models import AgentTask
 from app.runtime.tools.approvals import approval_tools
 from app.runtime.tools.channel import channel_tools
+from app.runtime.tools.components import component_tools
 from app.runtime.tools.computer import computer_tools
 from app.runtime.tools.memory import memory_tools
 from app.runtime.tools.schedules import schedule_tools
@@ -22,4 +23,5 @@ def tools_for(task: AgentTask, computer: TaskComputer | None = None):
         *approval_tools(task),
         *schedule_tools(task),
         *computer_tools(task, computer),
+        *component_tools(task),
     ]

@@ -5,6 +5,7 @@ import Avatar from "./Avatar";
 import Composer from "./Composer";
 import TaskPanel from "./TaskPanel";
 import RichText, { MentionNames } from "./RichText";
+import MessageComponents from "./MessageComponents";
 import type { Modal, OpenComputer } from "./Workspace";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -63,6 +64,7 @@ function MessageRow({
         )}
         {chatter && targets.length > 0 && <div className="chatter-label">to {targets.join(", ")}</div>}
         <RichText text={message.content} />
+        {message.components?.length > 0 && <MessageComponents components={message.components} />}
       </div>
     </div>
   );
