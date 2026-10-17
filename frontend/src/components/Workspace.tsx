@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch } from "react";
 import { api } from "../api";
-import type { Action, State } from "../store";
+import { policyBlock, type Action, type State } from "../store";
 import type { ChannelComputer } from "../types";
 import AgentModal from "./AgentModal";
 import ChannelView from "./ChannelView";
@@ -117,6 +117,7 @@ export default function Workspace({
                 taskId={computer.taskId}
                 agent={state.agents[computer.agentId]}
                 working={shown?.agent_working ?? false}
+                takeOverBlocked={policyBlock(state, channel, "computer_control")}
                 others={computers
                   .filter((c) => c.agent_id !== computer.agentId && state.agents[c.agent_id])
                   .map((c) => ({ agent: state.agents[c.agent_id], working: c.agent_working }))}

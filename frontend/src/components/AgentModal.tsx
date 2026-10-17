@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { api } from "../api";
-import type { State } from "../store";
+import { isAdmin, type State } from "../store";
 import type { Agent } from "../types";
 import Avatar from "./Avatar";
 import Field from "./Field";
@@ -117,16 +117,19 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
           {agent.is_master ? (
             <span />
           ) : (
-            <Button
-              variant="danger"
-              disabled={busy}
-              onClick={() =>
-                confirm(`Delete ${agent.name}? This also deletes the agent and its history on Band.`) &&
-                run(() => api("DELETE", `/api/agents/${agent.id}`), true)
-              }
-            >
-              Delete agent
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="danger"
+                disabled={busy || !isAdmin(state)}
+                onClick={() =>
+                  confirm(`Delete ${agent.name}? This also deletes the agent and its history on Band.`) &&
+                  run(() => api("DELETE", `/api/agents/${agent.id}`), true)
+                }
+              >
+                Delete agent
+              </Button>
+              {!isAdmin(state) && <span className={`${hint} text-[12.5px]`}>Only admins can delete agents</span>}
+            </div>
           )}
           <div className={actionsClass}>
             <Button variant="secondary" disabled={busy} onClick={() => run(() => api("POST", `/api/agents/${agent.id}/restart`))}>

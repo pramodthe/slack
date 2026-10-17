@@ -35,10 +35,11 @@ async function raw(method: string, path: string, body?: Blob): Promise<Response>
 const note = "text-muted-foreground text-xs";
 const emptyBox = "flex flex-col items-center gap-1.5 rounded-lg border border-dashed border-border bg-background px-4 py-9 text-center";
 
-export default function ComputerPanel({ taskId, agent, working, others, onSwitch, onClose }: {
+export default function ComputerPanel({ taskId, agent, working, takeOverBlocked, others, onSwitch, onClose }: {
   taskId: string;
   agent: Agent | undefined;
   working: boolean;
+  takeOverBlocked: string | null;
   others: { agent: Agent; working: boolean }[];
   onSwitch: (agentId: number) => void;
   onClose: () => void;
@@ -223,10 +224,13 @@ export default function ComputerPanel({ taskId, agent, working, others, onSwitch
                 {live ? "Reconnect" : "Connect"}
               </Button>
               {!control?.mine && (
-                <Button variant="chip" size="chip" disabled={!!busy} onClick={() => void openLive(true)}>Take over</Button>
+                <Button variant="chip" size="chip" disabled={!!busy || !!takeOverBlocked} onClick={() => void openLive(true)}>
+                  Take over
+                </Button>
               )}
               {control && <Button variant="chip" size="chip" disabled={!!busy} onClick={() => void handBack()}>Hand back</Button>}
             </div>
+            {takeOverBlocked && !control?.mine && <p className={note}>{takeOverBlocked}</p>}
           </TabsContent>
 
           <TabsContent value="files" className="flex flex-col gap-2">

@@ -7,7 +7,8 @@ from langchain_core.tools import InjectedToolCallId, tool
 
 from app.persistence.models import AgentTask
 from app.tasks.schedules import (ScheduleError, cancel_schedule as cancel_channel_schedule, channel_schedules,
-                                 create_schedule, serialize_schedule)
+                                 create_schedule, describe, serialize_schedule)
+from app.workspace.audit import record_agent
 
 
 def schedule_tools(task: AgentTask):
@@ -38,6 +39,8 @@ def schedule_tools(task: AgentTask):
     def cancel_schedule(schedule_id: int) -> dict:
         """Cancel one of this channel's schedules by id (see list_schedules)."""
         cancelled = cancel_channel_schedule(task.channel_id, schedule_id)
+        if cancelled:
+            record_agent(task, "schedule_cancelled", schedule=describe(cancelled), prompt=cancelled.prompt)
         return {"status": "cancelled", **serialize_schedule(cancelled)} if cancelled else {
             "error": "No active schedule with that id in this channel."}
 

@@ -1,4 +1,18 @@
-import type { Agent, BandStatus, Bootstrap, Channel, Draft, Message, Model, Role, ServerEvent, TaskActivity, User } from "./types";
+import type {
+  Agent,
+  BandStatus,
+  Bootstrap,
+  Channel,
+  ChannelPolicy,
+  Draft,
+  Message,
+  Model,
+  Role,
+  ServerEvent,
+  TaskActivity,
+  User,
+  WorkspaceRole,
+} from "./types";
 
 export interface State {
   me: User;
@@ -11,10 +25,26 @@ export interface State {
   drafts: Record<number, Record<string, Draft>>;
   unread: Record<number, number>;
   roles: Role[];
+  workspaceRoles: Record<number, WorkspaceRole>;
+  budgetRevision: number;
   models: Model[];
   band: BandStatus;
   anthropicConfigured: boolean;
   activeChannelId: number | null;
+}
+
+export const roleOf = (state: State, userId: number): WorkspaceRole => state.workspaceRoles[userId] ?? "member";
+export const isAdmin = (state: State) => roleOf(state, state.me.id) !== "member";
+
+const POLICY_REASONS: Record<keyof ChannelPolicy, string> = {
+  approvers: "Only workspace admins can decide approvals in this channel.",
+  computer_control: "Only workspace admins can take over computers in this channel.",
+};
+
+/** Why the current person can't act under a channel policy setting, or null when they can. */
+export function policyBlock(state: State, channel: Channel | null | undefined, setting: keyof ChannelPolicy): string | null {
+  if (!channel || channel.policy?.[setting] !== "admins" || isAdmin(state)) return null;
+  return POLICY_REASONS[setting];
 }
 
 export type Action =
@@ -38,6 +68,8 @@ export function initialState(boot: Bootstrap): State {
     drafts: {},
     unread: {},
     roles: boot.roles,
+    workspaceRoles: Object.fromEntries(Object.entries(boot.workspace_roles ?? {}).map(([id, role]) => [Number(id), role])),
+    budgetRevision: 0,
     models: boot.models,
     band: boot.band,
     anthropicConfigured: boot.anthropic_configured,
@@ -137,6 +169,14 @@ function applyEvent(state: State, event: ServerEvent): State {
         drafts: { ...state.drafts, [draft.channel_id]: { ...state.drafts[draft.channel_id], [draft.task_id]: draft } },
       };
     }
+    case "workspace_role": {
+      const workspaceRoles = { ...state.workspaceRoles };
+      if (event.role === "member") delete workspaceRoles[event.user_id];
+      else workspaceRoles[event.user_id] = event.role;
+      return { ...state, workspaceRoles };
+    }
+    case "budget":
+      return { ...state, budgetRevision: state.budgetRevision + 1 };
     case "draft_append": {
       const current = state.drafts[event.channel_id]?.[event.task_id];
       // Only extend the exact text the append was cut from; the server resends the full draft regularly.

@@ -14,6 +14,7 @@ from app.config import settings
 from app.persistence.models import (AgentProfile, AgentTask, DirectMessage, Message, OutsideAgent, OutsideHandoff,
                                     TaskHandoff, TeammateRequest, db)
 from app.tasks.queue import MAX_HANDOFFS, handoff_root, handoffs_used
+from app.workspace.audit import record_agent
 from app.workspace.roles import ROLES, role_label
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,8 @@ async def ask_outside(task: AgentTask, outside: OutsideAgent, request: str, call
                     content=f"@{outside.name} {request}", to_humans=False, band_message_id=f"handoff:{call_id}",
                     mentions=[{"type": "external", "id": None, "name": outside.name}]),
         ])
+        record_agent(task, "handoff", session=session, ref=f"handoff:{call_id}", teammate=outside.name,
+                     request=request, outside=True)
         try:
             session.commit()
         except IntegrityError:

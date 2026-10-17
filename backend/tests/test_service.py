@@ -11,7 +11,8 @@ import app.workspace.service as service_module
 from app.band.listener import BandIdentity
 from app.auth import encrypt_secret
 from app.band.org import BandOrg, Owner
-from app.persistence.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
+from app.persistence.models import (AgentProfile, AgentTask, AuditEvent, Budget, Channel, ChannelMember, ChannelPolicy,
+                                    DirectMessage, Message, TaskUsage, User, WorkspaceRole, db, init_db)
 from app.workspace.service import AppService
 
 
@@ -49,7 +50,8 @@ class FakeOrg(BandOrg):
 def svc(monkeypatch) -> AppService:
     init_db()
     with db() as session:
-        for model in (AgentTask, DirectMessage, Message, ChannelMember, AgentProfile, Channel, User):
+        for model in (AgentTask, DirectMessage, Message, ChannelMember, AgentProfile, Channel, User, AuditEvent,
+                      TaskUsage, Budget, WorkspaceRole, ChannelPolicy):
             for row in session.exec(select(model)).all():
                 session.delete(row)
         session.commit()

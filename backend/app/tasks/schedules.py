@@ -12,6 +12,7 @@ from sqlmodel import select
 from app.config import settings
 from app.persistence.models import AgentProfile, AgentTask, Schedule, db, utcnow
 from app.tasks.queue import channel_context, enqueue
+from app.workspace.audit import record_agent
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,8 @@ def create_schedule(task: AgentTask, *, request: str, cadence: str, time_of_day:
         agent = session.get(AgentProfile, task.agent_id)
         schedule.created_by = agent.name if agent else ""
         session.add(schedule)
+        record_agent(task, "schedule_created", session=session, ref=f"schedule:{call_id}",
+                     schedule=describe(schedule), prompt=request)
         try:
             session.commit()
         except IntegrityError:

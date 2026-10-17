@@ -16,9 +16,11 @@ from app.auth import encrypt_secret
 from app.band.org import BandOrg
 from app.config import settings
 from app.workspace.events import bus
-from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
+from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Budget, Channel, ChannelMember, DirectMessage, Message,
                                     MessageComponent, MessageDraft, OutsideAgent, Schedule, TaskApproval, TaskSandbox,
                                     TeammateRequest, User, db, dm_owner)
+from app.workspace.audit import record
+from app.workspace.permissions import policy_of, serialize_policy
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context, display_names
 from app.tasks.teammates import settle_interrupted
@@ -177,7 +179,8 @@ class AppService:
                         AgentTask, AgentTask.reply_message_id == Message.id
                     ).where(Message.id > after_id)).all() + session.exec(select(Message).where(
                         Message.id > after_id, Message.band_message_id.startswith("handoff:")
-                        | Message.band_message_id.startswith("approval:"))).all()
+                        | Message.band_message_id.startswith("approval:")
+                        | Message.band_message_id.startswith("budget:"))).all()
                     working = session.exec(select(AgentTask).where(
                         AgentTask.status.in_(["queued", "running", "waiting"]))).all()
                     payloads = serialize_messages(session, sorted(messages, key=lambda m: m.id))
@@ -256,6 +259,11 @@ class AppService:
         with db() as session:
             session.exec(update(TeammateRequest).where(TeammateRequest.id == request_id).values(
                 status=status, agent_id=agent_id, error=error[:500]))
+            if status == "created":
+                record("agent_created", actor_type="agent", actor_id=request.requested_by_agent_id,
+                       actor_name=requester.name if requester else "Agent", channel_id=request.channel_id,
+                       task_id=request.task_id, detail={"agent": profile.name, "role": profile.role,
+                                                        "model": profile.model}, session=session)
             session.commit()
         if status == "created":
             await self.system_message(request.channel_id, f"{requester.name if requester else 'An agent'} created "
@@ -334,6 +342,7 @@ class AppService:
             "outside_agents": [serialize_outside_agent(o) for o in outsiders],
             "is_dm": dm is not None,
             "dm_agent_id": dm.agent_id if dm else None,
+            "policy": serialize_policy(policy_of(session, channel.id)),
         }
 
     async def publish_channel(self, channel_id: int) -> None:
@@ -616,9 +625,11 @@ class AppService:
             for schedule in session.exec(select(Schedule).where(Schedule.agent_id == profile.id)).all():
                 schedule.enabled = False
                 session.add(schedule)
-            for record in session.exec(select(TaskSandbox).where(
+            for sandbox in session.exec(select(TaskSandbox).where(
                     TaskSandbox.task_id.startswith(f"agent-{profile.band_agent_id}-"))).all():
-                session.delete(record)  # The cloud computer itself auto-stops and auto-deletes.
+                session.delete(sandbox)  # The cloud computer itself auto-stops and auto-deletes.
+            if budget := session.get(Budget, ("agent", profile.id)):
+                session.delete(budget)
             for dm in session.exec(select(DirectMessage).where(DirectMessage.agent_id == profile.id)).all():
                 dm.agent_id = None
                 session.add(dm)
