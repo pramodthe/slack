@@ -3,16 +3,21 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import sqlite3
+from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
+from langchain.agents.middleware.internal_call_transformer import internal_call_metadata
+from sqlalchemy.exc import OperationalError
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 import app.tasks.drafts as drafts
+import app.workspace.service as service_module
 from app.auth import issue_token
 from app.main import app
-from app.persistence.models import AgentTask, MessageDraft, db
+from app.persistence.models import AgentTask, Message, MessageDraft, db
 from app.runtime.harness import build_harness
 from app.runtime.helpers.coder import coder
 from app.runtime.tools import hosted
@@ -60,7 +65,7 @@ def recording(monkeypatch) -> list[str]:
 
     def record(task, content):
         writes.append(content)
-        original(task, content)
+        return original(task, content)
     monkeypatch.setattr(drafts, "save_draft", record)
     monkeypatch.setattr(drafts, "DRAFT_INTERVAL", 0)
     return writes
@@ -142,6 +147,54 @@ def test_failed_and_cancelled_tasks_drop_their_draft(job):
     assert draft_row(task.id) is None
 
 
+def test_a_locked_database_skips_draft_writes_without_failing_the_task(tmp_path, monkeypatch, job):
+    task, _, _ = job
+    attempts = []
+
+    class LockedSession:
+        def __init__(self, session):
+            self.session = session
+
+        def merge(self, *args, **kwargs):
+            attempts.append(1)
+            raise OperationalError("INSERT INTO messagedraft", {}, sqlite3.OperationalError("database is locked"))
+
+        def __getattr__(self, name):
+            return getattr(self.session, name)
+
+    @contextmanager
+    def locked_db():
+        with db() as session:
+            yield LockedSession(session)
+    monkeypatch.setattr(drafts, "db", locked_db)
+    monkeypatch.setattr(drafts, "DRAFT_INTERVAL", 0)
+    model = StreamingModel(responses=[AIMessage(content="The answer streams while the database is busy")])
+
+    async def scenario():
+        async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "locked.db")) as saver:
+            await saver.setup()
+            update_task(task.id, status="running")
+            await process(task, saver, executor=lambda t, s: run(t, s, model))
+    asyncio.run(scenario())
+    with db() as session:
+        done = session.get(AgentTask, task.id)
+        reply = session.get(Message, done.reply_message_id)
+    assert done.status == "completed" and done.error is None
+    assert reply.content == "The answer streams while the database is busy"
+    assert len(attempts) == 1  # backed off instead of retrying every token against a locked database
+
+
+def test_summarization_output_never_reaches_the_draft(job):
+    task, _, _ = job
+    draft = Draft(task, enabled=True)
+    draft.feed((), AIMessageChunk(content="Partial answer"), {"langgraph_node": "model"})
+    summary = {"langgraph_node": "model", "lc_source": "summarization"}
+    draft.feed((), AIMessageChunk(content=" SUMMARY with untrusted page text"), summary)
+    draft.feed((), AIMessageChunk(content=" internal call"), {"langgraph_node": "model", **internal_call_metadata()})
+    assert draft.text == "Partial answer"
+    assert draft_row(task.id).content == "Partial answer"
+
+
 def test_drafts_reach_websocket_and_clear_when_the_reply_lands(job):
     task, _, user = job
     with TestClient(app) as client:
@@ -163,6 +216,27 @@ def test_drafts_reach_websocket_and_clear_when_the_reply_lands(job):
                     assert event["content"] == ""
                     seen.append("cleared")
             assert seen == ["message", "cleared"]
+
+
+def test_drafts_stream_appended_text_and_resync_in_full(job, monkeypatch):
+    task, _, user = job
+    monkeypatch.setattr(service_module, "DRAFT_RESYNC", 2)
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={issue_token(user.id)}") as ws:
+            def written(content: str) -> dict:
+                save_draft(task, content)
+                event = ws.receive_json()
+                while not (event["type"] in ("draft", "draft_append") and event["task_id"] == task.id):
+                    event = ws.receive_json()
+                return event
+
+            base = {"task_id": task.id, "channel_id": task.channel_id, "agent_id": task.agent_id}
+            assert written("😀 Hello") == {"type": "draft", **base, "content": "😀 Hello"}
+            # The emoji is two UTF-16 units in the browser, so the offset is 8, not Python's 7.
+            assert written("😀 Hello wor") == {"type": "draft_append", **base, "offset": 8, "text": " wor"}
+            assert written("😀 Hello world") == {"type": "draft_append", **base, "offset": 12, "text": "ld"}
+            assert written("😀 Hello world!") == {"type": "draft", **base, "content": "😀 Hello world!"}
+            assert written("Rewritten") == {"type": "draft", **base, "content": "Rewritten"}
 
 
 def test_code_execution_text_before_the_tool_is_not_part_of_the_answer(job):

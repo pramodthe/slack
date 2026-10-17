@@ -14,7 +14,7 @@ from app.config import settings
 from app.persistence.models import AgentProfile, AgentTask, Channel, Message, db
 from sqlmodel import select
 from app.tasks import display_names, enqueue
-from app.tasks.teammates import outside_reply
+from app.tasks.teammates import link_outside_reply, outside_reply
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +83,12 @@ class QueuedAgentAdapter(SimpleAdapter):
         )[-24000:]
         with db() as session:
             context, prompt = display_names(session, context), display_names(session, msg.content)
-            prompt = outside_reply(session, self.profile_id, channel.id, msg.sender_id, prompt)
-        enqueue(agent_id=self.profile_id, channel_id=channel.id, room_id=room_id,
-                source_id=msg.id, prompt=prompt, context=context,
-                reply_to=self.reply_to or msg.sender_id)
+            prompt, origin = outside_reply(session, self.profile_id, channel.id, msg.sender_id, prompt)
+        task = enqueue(agent_id=self.profile_id, channel_id=channel.id, room_id=room_id,
+                       source_id=msg.id, prompt=prompt, context=context,
+                       reply_to=self.reply_to or msg.sender_id)
+        if origin:
+            link_outside_reply(task, origin)
 
 
 @dataclass

@@ -8,10 +8,10 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from app.persistence.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, TaskApproval, TaskHandoff, db,
-                        utcnow)
+from app.persistence.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, OutsideHandoff,
+                                    TaskApproval, TaskHandoff, db, utcnow)
 
-# Teammate hand-offs allowed per original request; each also yields at most one report back.
+# Teammate hand-offs (local or outside) allowed per original request; each also yields at most one report back.
 MAX_HANDOFFS = 6
 
 
@@ -61,7 +61,24 @@ def recover_tasks() -> None:
             task.progress = "Recovered after worker restart; resuming checkpoint"
             task.updated_at = utcnow()
             session.add(task)
+        # An outside request interrupted mid-send may or may not have reached Band; it is never resent.
+        session.exec(update(OutsideHandoff).where(OutsideHandoff.status == "sending").values(status="unknown"))
         session.commit()
+
+
+def handoff_root(session, task_id: str) -> str:
+    """The original request a task works on behalf of."""
+    link = session.get(TaskHandoff, task_id)
+    return link.root_task_id if link else task_id
+
+
+def handoffs_used(session, root: str) -> int:
+    """Local and outside hand-offs made for one original request, so neither kind can loop forever."""
+    chain = [root, *session.exec(select(TaskHandoff.task_id).where(TaskHandoff.root_task_id == root)).all()]
+    local = session.exec(select(TaskHandoff.task_id).where(
+        TaskHandoff.root_task_id == root, TaskHandoff.kind == "handoff")).all()
+    outside = session.exec(select(OutsideHandoff.source_key).where(OutsideHandoff.task_id.in_(chain))).all()
+    return len(local) + len(outside)
 
 
 def next_task() -> AgentTask | None:
@@ -127,11 +144,8 @@ def hand_off(task: AgentTask, *, teammate: str, request: str, report_back: bool,
         existing = session.exec(select(AgentTask).where(AgentTask.source_key == source_key)).first()
         if existing:
             return {"status": "handed_off", "teammate": target.name, "task_id": existing.id}
-        link = session.get(TaskHandoff, task.id)
-        root = link.root_task_id if link else task.id
-        used = session.exec(select(TaskHandoff.task_id).where(
-            TaskHandoff.root_task_id == root, TaskHandoff.kind == "handoff")).all()
-        if len(used) >= MAX_HANDOFFS:
+        root = handoff_root(session, task.id)
+        if handoffs_used(session, root) >= MAX_HANDOFFS:
             return {"error": f"This request already used {MAX_HANDOFFS} teammate hand-offs. "
                              "Finish the work yourself and answer the humans."}
         child = AgentTask(id=uuid4().hex, source_key=source_key, channel_id=task.channel_id,

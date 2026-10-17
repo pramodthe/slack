@@ -137,6 +137,16 @@ function applyEvent(state: State, event: ServerEvent): State {
         drafts: { ...state.drafts, [draft.channel_id]: { ...state.drafts[draft.channel_id], [draft.task_id]: draft } },
       };
     }
+    case "draft_append": {
+      const current = state.drafts[event.channel_id]?.[event.task_id];
+      // Only extend the exact text the append was cut from; the server resends the full draft regularly.
+      if (!current || current.content.length !== event.offset) return state;
+      const draft = { ...current, content: current.content + event.text };
+      return {
+        ...state,
+        drafts: { ...state.drafts, [event.channel_id]: { ...state.drafts[event.channel_id], [event.task_id]: draft } },
+      };
+    }
   }
 }
 
@@ -152,7 +162,10 @@ export function reducer(state: State, action: Action): State {
     case "tasks_loaded": {
       // Polling seeds activity for clients that connected mid-task; WebSocket events keep it live.
       const active = action.tasks.filter((t) => t.status !== "done");
-      return { ...state, activity: { ...state.activity, [action.channelId]: Object.fromEntries(active.map((t) => [t.id, t])) } };
+      const next = { ...state, activity: { ...state.activity, [action.channelId]: Object.fromEntries(active.map((t) => [t.id, t])) } };
+      // A missed "done" or empty draft event (socket drop, API restart) would otherwise leave a stale bubble.
+      const working = new Set(active.map((t) => t.id));
+      return withoutDrafts(next, action.channelId, (d) => !working.has(d.task_id));
     }
     case "select_channel":
       return { ...state, activeChannelId: action.channelId, unread: { ...state.unread, [action.channelId]: 0 } };
