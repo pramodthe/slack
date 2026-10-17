@@ -147,7 +147,10 @@ export function reducer(state: State, action: Action): State {
     case "tasks_loaded": {
       // Polling seeds activity for clients that connected mid-task; WebSocket events keep it live.
       const active = action.tasks.filter((t) => t.status !== "done");
-      return { ...state, activity: { ...state.activity, [action.channelId]: Object.fromEntries(active.map((t) => [t.id, t])) } };
+      const next = { ...state, activity: { ...state.activity, [action.channelId]: Object.fromEntries(active.map((t) => [t.id, t])) } };
+      // A missed "done" or empty draft event (socket drop, API restart) would otherwise leave a stale bubble.
+      const working = new Set(active.map((t) => t.id));
+      return withoutDrafts(next, action.channelId, (d) => !working.has(d.task_id));
     }
     case "select_channel":
       return { ...state, activeChannelId: action.channelId, unread: { ...state.unread, [action.channelId]: 0 } };

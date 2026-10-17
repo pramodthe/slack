@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import sqlite3
+from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
+from langchain.agents.middleware.internal_call_transformer import internal_call_metadata
+from sqlalchemy.exc import OperationalError
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -12,7 +16,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 import app.tasks.drafts as drafts
 from app.auth import issue_token
 from app.main import app
-from app.persistence.models import AgentTask, MessageDraft, db
+from app.persistence.models import AgentTask, Message, MessageDraft, db
 from app.runtime.harness import build_harness
 from app.runtime.helpers.coder import coder
 from app.runtime.tools import hosted
@@ -60,7 +64,7 @@ def recording(monkeypatch) -> list[str]:
 
     def record(task, content):
         writes.append(content)
-        original(task, content)
+        return original(task, content)
     monkeypatch.setattr(drafts, "save_draft", record)
     monkeypatch.setattr(drafts, "DRAFT_INTERVAL", 0)
     return writes
@@ -140,6 +144,54 @@ def test_failed_and_cancelled_tasks_drop_their_draft(job):
     with db() as session:
         assert session.get(AgentTask, task.id).status == "cancelled"
     assert draft_row(task.id) is None
+
+
+def test_a_locked_database_skips_draft_writes_without_failing_the_task(tmp_path, monkeypatch, job):
+    task, _, _ = job
+    attempts = []
+
+    class LockedSession:
+        def __init__(self, session):
+            self.session = session
+
+        def merge(self, *args, **kwargs):
+            attempts.append(1)
+            raise OperationalError("INSERT INTO messagedraft", {}, sqlite3.OperationalError("database is locked"))
+
+        def __getattr__(self, name):
+            return getattr(self.session, name)
+
+    @contextmanager
+    def locked_db():
+        with db() as session:
+            yield LockedSession(session)
+    monkeypatch.setattr(drafts, "db", locked_db)
+    monkeypatch.setattr(drafts, "DRAFT_INTERVAL", 0)
+    model = StreamingModel(responses=[AIMessage(content="The answer streams while the database is busy")])
+
+    async def scenario():
+        async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "locked.db")) as saver:
+            await saver.setup()
+            update_task(task.id, status="running")
+            await process(task, saver, executor=lambda t, s: run(t, s, model))
+    asyncio.run(scenario())
+    with db() as session:
+        done = session.get(AgentTask, task.id)
+        reply = session.get(Message, done.reply_message_id)
+    assert done.status == "completed" and done.error is None
+    assert reply.content == "The answer streams while the database is busy"
+    assert len(attempts) == 1  # backed off instead of retrying every token against a locked database
+
+
+def test_summarization_output_never_reaches_the_draft(job):
+    task, _, _ = job
+    draft = Draft(task, enabled=True)
+    draft.feed((), AIMessageChunk(content="Partial answer"), {"langgraph_node": "model"})
+    summary = {"langgraph_node": "model", "lc_source": "summarization"}
+    draft.feed((), AIMessageChunk(content=" SUMMARY with untrusted page text"), summary)
+    draft.feed((), AIMessageChunk(content=" internal call"), {"langgraph_node": "model", **internal_call_metadata()})
+    assert draft.text == "Partial answer"
+    assert draft_row(task.id).content == "Partial answer"
 
 
 def test_drafts_reach_websocket_and_clear_when_the_reply_lands(job):

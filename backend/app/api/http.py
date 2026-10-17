@@ -210,6 +210,8 @@ async def invite_outside_agent(
 ):
     _channel_or_404(session, channel_id, user)
     _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    if not session.get(ChannelMember, (channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to invite outside agents")
     await service.invite_outside_agent(user, channel_id, body.band_id)
     return {"ok": True}
 
@@ -220,6 +222,8 @@ async def remove_outside_agent(
 ):
     _channel_or_404(session, channel_id, user)
     _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    if not session.get(ChannelMember, (channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to remove outside agents")
     await service.remove_outside_agent(channel_id, band_id)
     return {"ok": True}
 

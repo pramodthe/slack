@@ -20,6 +20,7 @@ from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channe
                                     dm_owner)
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context, display_names
+from app.tasks.teammates import settle_interrupted
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,11 @@ class AppService:
     async def startup(self) -> None:
         with db() as session:
             latest = session.exec(select(Message.id).order_by(Message.id.desc()).limit(1)).first() or 0
+        settle_interrupted()
         self._task_poller = asyncio.create_task(self._watch_task_messages(latest), name="task-messages")
-        self._teammate_poller = asyncio.create_task(self._watch_teammate_requests(), name="teammate-requests")
         await self.org.connect()
+        # Claimed before Band connects, a request would fail with "starting up" although Band is reachable.
+        self._teammate_poller = asyncio.create_task(self._watch_teammate_requests(), name="teammate-requests")
         await self._publish_band_status()
         if not self.org.online:
             return
@@ -192,6 +195,9 @@ class AppService:
                                               model=request.model, channel_id=request.channel_id,
                                               created_by_agent=request.requested_by_agent_id)
             status, agent_id = "created", profile.id
+        except asyncio.CancelledError:
+            settle_interrupted(request_id)
+            raise
         except ServiceError as exc:
             error = exc.message
         except Exception as exc:

@@ -12,8 +12,8 @@ from sqlmodel import select
 from app.auth import decrypt_secret
 from app.config import settings
 from app.persistence.models import (AgentProfile, AgentTask, DirectMessage, Message, OutsideAgent, OutsideHandoff,
-                                    TeammateRequest, db)
-from app.tasks.queue import MAX_HANDOFFS
+                                    TaskHandoff, TeammateRequest, db)
+from app.tasks.queue import MAX_HANDOFFS, handoff_root, handoffs_used
 from app.workspace.roles import ROLES, role_label
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 CREATE_WAIT = 30.0
 REGISTER_WAIT = 60.0
 POLL = 0.5
+INTERRUPTED = "The app server restarted while registering it; try again"
 
 
 def _role_key(role: str) -> str | None:
@@ -108,6 +109,24 @@ async def create_teammate(task: AgentTask, *, name: str, role: str, instructions
         await asyncio.sleep(POLL)
 
 
+def settle_interrupted(request_id: int | None = None) -> None:
+    """Resolve requests left `creating` by an interrupted registration: created if the agent was saved, else failed."""
+    with db() as session:
+        query = select(TeammateRequest).where(TeammateRequest.status == "creating")
+        if request_id is not None:
+            query = query.where(TeammateRequest.id == request_id)
+        for request in session.exec(query).all():
+            agent = session.exec(select(AgentProfile).where(
+                func.lower(AgentProfile.name) == request.name.lower(),
+                AgentProfile.created_by_agent == request.requested_by_agent_id)).first()
+            if agent:
+                request.status, request.agent_id = "created", agent.id
+            else:
+                request.status, request.error = "failed", INTERRUPTED
+            session.add(request)
+        session.commit()
+
+
 def _matches(value: str, *candidates: str) -> bool:
     wanted = value.strip().lstrip("@").lower()
     return any(wanted == c.lower() for c in candidates if c)
@@ -132,8 +151,9 @@ async def ask_outside(task: AgentTask, outside: OutsideAgent, request: str, call
     with db() as session:
         if existing := session.get(OutsideHandoff, source_key):
             return _sent(outside, existing.status)
-        if len(session.exec(select(OutsideHandoff).where(OutsideHandoff.task_id == task.id)).all()) >= MAX_HANDOFFS:
-            return {"error": f"This task already sent {MAX_HANDOFFS} requests to outside agents."}
+        if handoffs_used(session, handoff_root(session, task.id)) >= MAX_HANDOFFS:
+            return {"error": f"This request already used {MAX_HANDOFFS} hand-offs. "
+                             "Finish the work yourself and answer the humans."}
         sender = session.get(AgentProfile, task.agent_id)
         session.add_all([
             OutsideHandoff(source_key=source_key, task_id=task.id, channel_id=task.channel_id,
@@ -150,6 +170,7 @@ async def ask_outside(task: AgentTask, outside: OutsideAgent, request: str, call
     content = (f"@{outside.name} {request}\n\n"
                f"(From {sender.name} in Band Slack. Reply in this room and mention @{sender.name} so it gets your answer.)")
     client = AsyncRestClient(api_key=decrypt_secret(sender.band_api_key_enc), base_url=settings.band_rest_url)
+    status, band_message_id = "unknown", ""
     try:
         response = await client.agent_api_messages.create_agent_chat_message(
             task.room_id, message=ChatMessageRequest(content=content, mentions=[
@@ -158,34 +179,52 @@ async def ask_outside(task: AgentTask, outside: OutsideAgent, request: str, call
         status, band_message_id = "sent", response.data.id
     except Exception:
         logger.exception("Outside hand-off from task %s may not have reached Band", task.id)
-        status, band_message_id = "unknown", ""
     finally:
+        # Also runs when the task is cancelled mid-send, so the row never stays "sending".
+        with db() as session:
+            session.exec(update(OutsideHandoff).where(OutsideHandoff.source_key == source_key).values(
+                status=status, band_message_id=band_message_id))
+            session.commit()
         await aclose_rest_client(client)
-    with db() as session:
-        session.exec(update(OutsideHandoff).where(OutsideHandoff.source_key == source_key).values(
-            status=status, band_message_id=band_message_id))
-        session.commit()
     return _sent(outside, status)
 
 
-def outside_reply(session, agent_id: int, channel_id: int, sender_id: str, prompt: str) -> str:
-    """Frame an outside agent's mention as the answer to this agent's latest request to it, if there was one."""
+def outside_reply(session, agent_id: int, channel_id: int, sender_id: str, prompt: str) -> tuple[str, str | None]:
+    """Frame an outside agent's mention as the answer to this agent's latest confirmed request to it.
+
+    Also returns the requesting task's id, or None when the mention answers no request of this agent.
+    """
     handoff = session.exec(select(OutsideHandoff).where(
         OutsideHandoff.channel_id == channel_id, OutsideHandoff.band_id == sender_id,
-        OutsideHandoff.status != "unknown").order_by(OutsideHandoff.created_at.desc())).first()
+        OutsideHandoff.status == "sent").order_by(OutsideHandoff.created_at.desc())).first()
     origin = session.get(AgentTask, handoff.task_id) if handoff else None
     if origin is None or origin.agent_id != agent_id:
-        return prompt
+        return prompt, None
     outsider = session.get(OutsideAgent, (channel_id, sender_id))
     name = outsider.name if outsider else "The outside agent"
     return (f"{name} (an outside Band agent) answered the request you sent it: \"{handoff.request}\"\n"
             f"You sent that request while working on: \"{origin.prompt[:2000]}\"\n\n"
             f"{name}'s reply:\n{prompt}\n\n"
-            "Use the reply to finish that work and answer the humans.")
+            "Use the reply to finish that work and answer the humans."), origin.id
+
+
+def link_outside_reply(task: AgentTask, origin_id: str) -> None:
+    """Chain an outside agent's answer to the request that asked for it, so they share one hand-off budget."""
+    with db() as session:
+        if session.get(TaskHandoff, task.id) or task.id == origin_id:
+            return
+        session.add(TaskHandoff(task_id=task.id, root_task_id=handoff_root(session, origin_id),
+                                parent_task_id=origin_id, from_agent_id=task.agent_id, kind="report",
+                                report_back=False))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
 
 
 def _sent(outside: OutsideAgent, status: str) -> dict:
-    if status == "unknown":
+    # "sending" on a replay means the first attempt was interrupted before Band confirmed it.
+    if status in ("unknown", "sending"):
         return {"error": f"Couldn't confirm the request reached {outside.name} through Band. Don't resend it; "
                          "tell the humans it may not have arrived."}
     return {"status": "handed_off", "teammate": outside.name, "outside": True,

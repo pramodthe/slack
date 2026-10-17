@@ -13,14 +13,17 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqlmodel import select
 
 import app.tasks.teammates as teammates_module
+from app.api.http import service as http_service
 from app.auth import encrypt_secret, issue_token
 from app.config import settings
 from app.main import app
+from app.band.listener import QueuedAgentAdapter
 from app.persistence.models import (AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message,
-                                    OutsideAgent, OutsideHandoff, TeammateRequest, User, db)
+                                    OutsideAgent, OutsideHandoff, TaskHandoff, TeammateRequest, User, db)
 from app.runtime.harness import build_harness
 from app.runtime.tools import tools_for
-from app.tasks import enqueue, update_task
+from app.tasks import enqueue, recover_tasks, update_task
+from app.tasks.queue import MAX_HANDOFFS
 from app.tasks.teammates import create_teammate, outside_reply
 from app.tasks.worker import execute
 from app.workspace.service import AppService, ServiceError
@@ -147,6 +150,88 @@ def test_band_offline_fails_the_request_with_a_clear_error(team):
     assert "Not connected to Band" in result["error"]
     with db() as session:
         assert not session.exec(select(AgentProfile).where(AgentProfile.name == "Scout")).first()
+
+
+def _status(request_id: int) -> TeammateRequest:
+    with db() as session:
+        return session.get(TeammateRequest, request_id)
+
+
+def _creating(task, name: str, call_id: str) -> int:
+    request_id = teammates_module._request(task, name=name, role="researcher", instructions="", call_id=call_id)
+    with db() as session:
+        request = session.get(TeammateRequest, request_id)
+        request.status = "creating"
+        session.add(request)
+        session.commit()
+    return request_id
+
+
+def test_teammate_request_left_creating_by_a_restart_is_recovered(team):
+    svc, task, master, _, _ = team
+    stuck = _creating(task, "Scout", "before-restart")
+    registered = _creating(task, "Quill", "saved-before-restart")
+    with db() as session:
+        quill = AgentProfile(name="Quill", role="researcher", band_agent_id="agent-quill",
+                             band_api_key_enc=encrypt_secret("k"), created_by_agent=master.id)
+        session.add(quill)
+        session.commit()
+        session.refresh(quill)
+    teammates_module.settle_interrupted()
+    assert _status(stuck).status == "failed" and "restarted" in _status(stuck).error
+    assert _status(registered).status == "created" and _status(registered).agent_id == quill.id
+    fresh = teammates_module._request(task, name="Scout", role="researcher", instructions="", call_id="after-restart")
+    assert isinstance(fresh, int) and fresh != stuck and _status(fresh).status == "pending"
+
+
+def test_cancelled_registration_does_not_leave_the_request_creating(team, monkeypatch):
+    svc, task, _, _, _ = team
+    started = asyncio.Event()
+
+    async def slow_create(**kwargs):
+        started.set()
+        await asyncio.sleep(30)
+    monkeypatch.setattr(svc, "create_agent", slow_create)
+    request_id = teammates_module._request(task, name="Scout", role="researcher", instructions="", call_id="cut")
+
+    async def scenario():
+        work = asyncio.create_task(svc.process_teammate_request(request_id))
+        await started.wait()
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+    asyncio.run(scenario())
+    assert _status(request_id).status == "failed"
+
+
+def test_teammate_requests_wait_until_band_has_connected(team, monkeypatch):
+    svc, task, _, _, _ = team
+    request_id = teammates_module._request(task, name="Scout", role="researcher", instructions="", call_id="boot")
+    during_connect = []
+
+    async def slow_connect():
+        await asyncio.sleep(1.2)  # the watcher polls every 0.5 s, so it would have claimed the request by now
+        during_connect.append(_status(request_id).status)
+
+    async def no_listener(profile):
+        return None
+    monkeypatch.setattr(svc.org, "connect", slow_connect)
+    monkeypatch.setattr(svc, "start_agent", no_listener)
+
+    async def scenario():
+        await svc.startup()
+        try:
+            for _ in range(50):
+                if _status(request_id).status != "pending":
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            for poller in (svc._task_poller, svc._teammate_poller, svc._poller):
+                if poller:
+                    poller.cancel()
+                    await asyncio.gather(poller, return_exceptions=True)
+    asyncio.run(scenario())
+    assert during_connect == ["pending"]
+    assert _status(request_id).status == "created"
 
 
 def test_master_creates_a_teammate_then_hands_off_to_it(tmp_path, team):
@@ -288,11 +373,109 @@ def test_outside_reply_comes_back_as_the_answer_to_the_request(team, monkeypatch
     with db() as session:
         stored = session.exec(select(Message).where(Message.band_message_id == "tom-1")).one()
         assert stored.author_type == "external" and stored.content == f"@{master.name} p95 is 120 ms."
-        prompt = outside_reply(session, master.id, channel.id, "peer-tom", stored.content)
+        prompt, origin = outside_reply(session, master.id, channel.id, "peer-tom", stored.content)
+        assert origin == task.id
         assert "Run the benchmark and report the p95." in prompt and task.prompt in prompt
         assert prompt.index("p95 is 120 ms.") > prompt.index(task.prompt)
-        assert outside_reply(session, master.id, channel.id, "someone-else", "hi") == "hi"
-        assert outside_reply(session, master.id + 999, channel.id, "peer-tom", "hi") == "hi"
+        assert outside_reply(session, master.id, channel.id, "someone-else", "hi") == ("hi", None)
+        assert outside_reply(session, master.id + 999, channel.id, "peer-tom", "hi") == ("hi", None)
+
+
+def test_only_channel_members_can_invite_or_remove_outside_agents(team, monkeypatch):
+    _, _, _, channel, member = team
+    calls = []
+
+    async def invite(user, channel_id, band_id):
+        calls.append(("invite", user.id, band_id))
+
+    async def remove(channel_id, band_id):
+        calls.append(("remove", band_id))
+    monkeypatch.setattr(http_service, "invite_outside_agent", invite)
+    monkeypatch.setattr(http_service, "remove_outside_agent", remove)
+    with db() as session:
+        outsider = User(username="mallory", display_name="Mallory", password_hash="x")
+        session.add(outsider)
+        session.commit()
+        session.refresh(outsider)
+    with TestClient(app) as client:
+        for user, expected in ((outsider, 403), (member, 200)):
+            headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
+            invited = client.post(f"/api/channels/{channel.id}/outside-agents", headers=headers,
+                                  json={"band_id": "peer-tom"})
+            removed = client.delete(f"/api/channels/{channel.id}/outside-agents/peer-tom", headers=headers)
+            assert (invited.status_code, removed.status_code) == (expected, expected)
+    assert calls == [("invite", member.id, "peer-tom"), ("remove", "peer-tom")]
+
+
+def _tom(channel_id: int) -> OutsideAgent:
+    with db() as session:
+        tom = OutsideAgent(channel_id=channel_id, band_id="peer-tom", handle="pat/tom", name="Tom")
+        session.add(tom)
+        session.commit()
+        session.refresh(tom)
+        return tom
+
+
+def _handoff_status(source_key: str) -> str:
+    with db() as session:
+        return session.get(OutsideHandoff, source_key).status
+
+
+def test_outside_handoff_interrupted_mid_send_is_never_reported_as_sent(team, monkeypatch):
+    _, task, master, channel, _ = team
+    started = asyncio.Event()
+
+    class HangingRest(FakeRest):
+        async def create_agent_chat_message(self, room_id, message, request_options):
+            FakeRest.sent.append((room_id, message))
+            started.set()
+            await asyncio.sleep(30)
+    monkeypatch.setattr(teammates_module, "AsyncRestClient", HangingRest)
+    monkeypatch.setattr(teammates_module, "aclose_rest_client", _no_close)
+    FakeRest.sent, FakeRest.fail = [], False
+    tom = _tom(channel.id)
+
+    async def cancelled_mid_send():
+        work = asyncio.create_task(teammates_module.ask_outside(task, tom, "Run the benchmark.", "cut-1"))
+        await started.wait()
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+    asyncio.run(cancelled_mid_send())
+    assert _handoff_status(f"{task.id}:cut-1") == "unknown"
+
+    # A row a crashed worker left "sending": the replay must not claim success or send again.
+    with db() as session:
+        session.add(OutsideHandoff(source_key=f"{task.id}:cut-2", task_id=task.id, channel_id=channel.id,
+                                   band_id="peer-tom", request="Run the benchmark.", status="sending"))
+        session.commit()
+    sent_before = len(FakeRest.sent)
+    assert "Couldn't confirm" in _ask(task, "Tom", "cut-2")["error"]
+    assert len(FakeRest.sent) == sent_before
+    with db() as session:
+        assert outside_reply(session, master.id, channel.id, "peer-tom", "hi") == ("hi", None)
+    recover_tasks()
+    assert _handoff_status(f"{task.id}:cut-2") == "unknown"
+
+
+def test_outside_replies_share_the_original_request_handoff_budget(team, monkeypatch):
+    _, task, master, channel, _ = team
+    monkeypatch.setattr(teammates_module, "AsyncRestClient", FakeRest)
+    monkeypatch.setattr(teammates_module, "aclose_rest_client", _no_close)
+    FakeRest.sent, FakeRest.fail = [], False
+    _tom(channel.id)
+    for i in range(MAX_HANDOFFS - 1):
+        assert _ask(task, "Tom", f"ask-{i}")["status"] == "handed_off"
+
+    adapter = QueuedAgentAdapter(profile_id=master.id, reply_to="")
+    reply = SimpleNamespace(id="tom-reply-1", sender_id="peer-tom", content=f"@{master.name} done, anything else?")
+    asyncio.run(adapter.on_message(reply, None, [], None, None, is_session_bootstrap=False, room_id="room-crew"))
+    with db() as session:
+        follow_up = session.exec(select(AgentTask).where(
+            AgentTask.source_key == f"{master.id}:room-crew:tom-reply-1")).one()
+        assert session.get(TaskHandoff, follow_up.id).root_task_id == task.id
+    assert _ask(follow_up, "Tom", "again-1")["status"] == "handed_off"
+    assert "already used" in _ask(follow_up, "Tom", "again-2")["error"]
+    assert len(FakeRest.sent) == MAX_HANDOFFS
 
 
 def test_outside_agent_endpoints_reject_dms_and_offline_band(team):
