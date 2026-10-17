@@ -78,7 +78,7 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
                 <SelectTrigger id={`${id}-role`} className="w-full">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent position="popper" className="tool-ui">
+                <SelectContent position="popper">
                   {state.roles.map((r) => (
                     <SelectItem key={r.id} value={r.id}>
                       {r.label}
@@ -93,7 +93,7 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
               <SelectTrigger id={`${id}-model`} className="w-full">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent position="popper" className="tool-ui">
+              <SelectContent position="popper">
                 {state.models.map((m) => (
                   <SelectItem key={m.id} value={m.id}>
                     {m.label}

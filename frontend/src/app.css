@@ -1,6 +1,4 @@
-@layer theme, base, components, utilities;
-@import "tailwindcss/theme.css" layer(theme);
-@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tailwindcss" source(none);
 @import "tw-animate-css";
 @import "tw-shimmer";
 @import "@fontsource/lato/400.css";
@@ -15,7 +13,7 @@
 /* The app's one breakpoint: at 900px and below, side panels overlay or hide. */
 @custom-variant narrow (@media (max-width: 900px));
 
-/* Slack palette. Prefixed so these never collide with the older variables in styles.css. */
+/* Slack palette, mapped onto shadcn's semantic colour names in @theme below. */
 :root {
   --ui-background: #ffffff;
   --ui-foreground: #1d1c1d;
@@ -81,36 +79,32 @@
   }
 }
 
-/* Document globals live in the base layer so utilities always win over them. */
+/* Globals preflight doesn't cover. The app was laid out with the browser's normal line height. */
 @layer base {
   :root {
     font-family: var(--font-sans);
     font-size: 15px;
+    line-height: normal;
     color: var(--color-foreground);
   }
   *,
   ::before,
   ::after {
-    box-sizing: border-box;
+    border-color: var(--color-border);
   }
   html,
   body,
   #root {
-    margin: 0;
     height: 100%;
   }
   button {
-    font: inherit;
     cursor: pointer;
   }
-  input,
-  textarea,
-  select {
-    font: inherit;
-    color: inherit;
+  code,
+  pre {
+    font-variant-ligatures: none;
   }
-  :not(pre) > code,
-  .tool-ui :not(pre) > code {
+  :not(pre) > code {
     font-family: var(--font-mono);
     font-size: 0.85em;
     background: #f4f4f4;
@@ -121,33 +115,3 @@
   }
 }
 
-@layer base {
-  .tool-ui,
-  .tool-ui *,
-  .tool-ui ::before,
-  .tool-ui ::after {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-    border: 0 solid;
-  }
-  .tool-ui button {
-    background: transparent;
-    color: inherit;
-    font: inherit;
-  }
-  .tool-ui [hidden]:where(:not([hidden="until-found"])) {
-    display: none !important;
-  }
-  .tool-ui a {
-    color: inherit;
-    text-decoration: inherit;
-  }
-  .tool-ui table {
-    border-collapse: collapse;
-    text-indent: 0;
-  }
-  .tool-ui svg {
-    display: block;
-  }
-}

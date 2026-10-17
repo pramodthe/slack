@@ -126,7 +126,7 @@ export function SourcesPill({ links }: { links: string[] }) {
   const [open, setOpen] = useState(false);
   const sources = links.map((url) => ({ url, domain: hostOf(url), title: url.replace(/^https?:\/\/(www\.)?/, "") }));
   return (
-    <div className="tool-ui pt-1.5">
+    <div className="pt-1.5">
       <Sources className="max-w-md" sources={sources} open={open} onOpenChange={setOpen} layout="list" />
     </div>
   );

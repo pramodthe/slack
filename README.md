@@ -157,7 +157,7 @@ Offline tests exercise actual Deep Agents tool calls and helper delegation using
 - `backend/app/computer/`: Daytona desktop lifecycle, observations, actions, and files.
 - `backend/app/persistence/models.py`, `backend/app/auth.py`: database models, session authentication, and key encryption.
 - `backend/tests/`: offline regression tests.
-- `frontend/src/`: React workspace and task controls.
+- `frontend/src/`: React workspace and task controls, styled with Tailwind 4, [shadcn/ui](https://ui.shadcn.com) primitives (`components/ui/`) and [Tool UI](https://www.tool-ui.com) elements (`components/assistant-ui/elements/`). The Slack theme tokens (aubergine sidebar, Lato, Slack colours) and the few global styles live in `src/app.css`, the only stylesheet. New primitives come from `npx shadcn@latest add <name>` and new elements from `npx shadcn@latest add @assistant-ui/elements-<name>`; see CLAUDE.md for the post-install steps.
 
 ## Deployment limits
 

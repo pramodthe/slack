@@ -93,7 +93,7 @@ export default function Workspace({
   const shown = computer && computers.find((c) => c.agent_id === computer.agentId);
 
   return (
-    <div className="tool-ui flex h-full">
+    <div className="flex h-full">
       <Sidebar state={state} dispatch={dispatch} openModal={setModal} onSignOut={onSignOut} />
       <main className="flex min-w-0 flex-1 flex-col">
         <SetupBanner state={state} connected={connected} />
