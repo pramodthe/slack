@@ -107,6 +107,82 @@ export interface TaskActivity {
   progress: string;
 }
 
+export interface Task {
+  id: string;
+  agent_id: number;
+  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+  progress: string;
+  error: string | null;
+  cancel_requested: boolean;
+  delivery_status: string;
+  updated_at: string;
+}
+
+export interface Artifact {
+  path: string;
+  content: string;
+}
+
+export interface TaskDetail extends Task {
+  result: string;
+  artifacts: Artifact[];
+}
+
+export interface Approval {
+  id: string;
+  task_id: string;
+  agent_id: number;
+  action: string;
+  details: string;
+}
+
+export interface Schedule {
+  id: number;
+  agent_id: number;
+  prompt: string;
+  when: string;
+  next_run_at: string | null;
+}
+
+export interface Memory {
+  key: string;
+  content: string;
+  updated_at: string;
+}
+
+export interface ComputerControl {
+  user_name: string;
+  until: string;
+  mine: boolean;
+}
+
+export interface ComputerState {
+  configured: boolean;
+  status: string;
+  sandbox_id: string | null;
+  image: string;
+  width: number;
+  height: number;
+  last_action: string;
+  updated_at: string | null;
+  error: string | null;
+  dashboard_url: string;
+  control: ComputerControl | null;
+}
+
+export interface LiveView {
+  url: string;
+  expires_at: string;
+  control: ComputerControl | null;
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
+
 export interface Role {
   id: string;
   label: string;

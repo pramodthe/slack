@@ -130,7 +130,7 @@ export default function Sidebar({
         <div className="section">
           <div className="section-title">People</div>
           {people.map((u) => (
-            <div key={u.id} className="nav-item static">
+            <div key={u.id} className="nav-item is-static">
               <StatusDot state={u.online ? "online" : "stopped"} /> {u.display_name}
               {u.id === state.me.id && <span className="role-tag">you</span>}
             </div>

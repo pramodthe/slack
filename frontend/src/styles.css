@@ -64,7 +64,7 @@ code {
   color: var(--red);
   font-size: 13.5px;
 }
-.error.inline {
+.error.error-inline {
   font-size: inherit;
 }
 .loading,
@@ -260,7 +260,7 @@ code {
   white-space: nowrap;
   overflow: hidden;
 }
-.nav-item:hover:not(.static) {
+.nav-item:hover:not(.is-static) {
   background: var(--aubergine-hover);
 }
 .nav-item.active {
@@ -759,7 +759,7 @@ code {
   font-size: 14px;
   min-width: 0;
 }
-.member-name.static {
+.member-name.is-static {
   cursor: default;
 }
 .add-select {

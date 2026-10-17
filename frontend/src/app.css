@@ -1,0 +1,93 @@
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tw-animate-css";
+@import "tw-shimmer";
+@import "@fontsource/lato/400.css";
+@import "@fontsource/lato/700.css";
+@import "@fontsource/lato/900.css";
+
+@source "./";
+
+/* The app has no dark theme, so dark: variants only apply under an explicit .dark ancestor. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Slack palette. Prefixed so these never collide with the older variables in styles.css. */
+:root {
+  --ui-background: #ffffff;
+  --ui-foreground: #1d1c1d;
+  --ui-muted: #f8f8f8;
+  --ui-muted-foreground: #616061;
+  --ui-border: #e2e2e2;
+  --ui-input: #bbbbbb;
+  --ui-primary: #007a5a;
+  --ui-primary-foreground: #ffffff;
+  --ui-secondary: #f8f8f8;
+  --ui-secondary-foreground: #1d1c1d;
+  --ui-accent: #f4f4f4;
+  --ui-accent-foreground: #1d1c1d;
+  --ui-destructive: #e01e5a;
+  --ui-ring: #1164a3;
+}
+
+@theme inline {
+  --color-background: var(--ui-background);
+  --color-foreground: var(--ui-foreground);
+  --color-card: var(--ui-background);
+  --color-card-foreground: var(--ui-foreground);
+  --color-popover: var(--ui-background);
+  --color-popover-foreground: var(--ui-foreground);
+  --color-muted: var(--ui-muted);
+  --color-muted-foreground: var(--ui-muted-foreground);
+  --color-border: var(--ui-border);
+  --color-input: var(--ui-input);
+  --color-primary: var(--ui-primary);
+  --color-primary-foreground: var(--ui-primary-foreground);
+  --color-secondary: var(--ui-secondary);
+  --color-secondary-foreground: var(--ui-secondary-foreground);
+  --color-accent: var(--ui-accent);
+  --color-accent-foreground: var(--ui-accent-foreground);
+  --color-destructive: var(--ui-destructive);
+  --color-ring: var(--ui-ring);
+
+  --color-aubergine: #3f0e40;
+  --color-aubergine-dark: #350d36;
+  --color-aubergine-hover: #4d2a51;
+  --color-aubergine-line: #522653;
+  --color-sidebar-text: #cfc3cf;
+  --color-active: #1164a3;
+  --color-mention: #1264a3;
+  --color-mention-bg: #e8f5fa;
+  --color-online: #2bac76;
+  --color-away: #ecb22e;
+  --color-chatter: #7c3085;
+  --color-warning-bg: #fff8e1;
+  --color-error-bg: #fdecef;
+
+  --font-sans: "Lato", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", Consolas, monospace;
+}
+
+@layer base {
+  .tool-ui,
+  .tool-ui *,
+  .tool-ui ::before,
+  .tool-ui ::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+  }
+  .tool-ui button {
+    background: transparent;
+    color: inherit;
+    font: inherit;
+  }
+  .tool-ui table {
+    border-collapse: collapse;
+    text-indent: 0;
+  }
+  .tool-ui svg {
+    display: block;
+  }
+}
