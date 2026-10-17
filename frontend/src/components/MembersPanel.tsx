@@ -52,7 +52,7 @@ function Picker({ placeholder, onPick, children }: { placeholder: string; onPick
       <SelectTrigger size="sm" className="mt-1.5 w-full border-dashed border-[#bbb] bg-white shadow-none">
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
-      <SelectContent position="popper" className="tool-ui">
+      <SelectContent position="popper">
         {children}
       </SelectContent>
     </Select>

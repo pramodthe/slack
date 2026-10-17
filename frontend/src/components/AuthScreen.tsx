@@ -30,7 +30,7 @@ export default function AuthScreen({ onAuthed }: { onAuthed: (token: string) => 
   };
 
   return (
-    <div className="tool-ui grid min-h-full place-items-center bg-[linear-gradient(135deg,#3f0e40,#611f69)]">
+    <div className="grid min-h-full place-items-center bg-[linear-gradient(135deg,#3f0e40,#611f69)]">
       <form
         className="bg-background flex w-[380px] max-w-[calc(100vw-32px)] flex-col gap-3.5 rounded-xl p-8 shadow-[0_20px_60px_rgba(0,0,0,0.3)]"
         onSubmit={submit}

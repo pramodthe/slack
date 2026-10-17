@@ -6,7 +6,7 @@ Band Slack combines a FastAPI/SQLModel backend with a React/TypeScript frontend 
 
 - `backend/app/`: `main.py` is the ASGI entry; `api/http.py` defines REST/WebSocket endpoints and serves the built UI; `workspace/service.py` coordinates channels, agents, and messages; `band/org.py` wraps Band's Human API; `band/listener.py` enqueues agent work. Authentication and configuration stay at the package root. Models live in `persistence/`. The per-task Deep Agent lives in `runtime/` (helpers and tools in their own folders). The queue and worker live in `tasks/`. The Daytona desktop lives in `computer/`.
 - `backend/tests/`: pytest tests for API flows, service behavior, and role adapters.
-- `frontend/src/`: React components in `components/`, shared types in `types.ts`, API helpers in `api.ts`, and state in `store.ts`.
+- `frontend/src/`: React components in `components/`, shared types in `types.ts`, API helpers in `api.ts`, and state in `store.ts`. Styling is Tailwind 4 + shadcn/ui (`components/ui/`) + Tool UI elements (`components/assistant-ui/elements/`); the theme tokens and globals live in `src/app.css`, the only stylesheet.
 - `frontend/public/`: static assets; `frontend/dist/`: generated production UI.
 
 ## Build, Test, and Development Commands
@@ -22,7 +22,7 @@ Use Python 3.12+ with uv and Node 20+. Run commands from the indicated directory
 
 ## Coding Style & Naming Conventions
 
-Follow existing code: Python uses four-space indentation, type hints, and snake_case functions/modules; classes use PascalCase. TypeScript/TSX uses two-space indentation, double quotes, semicolons, camelCase variables, and PascalCase component filenames. Keep shared API types in `types.ts`. No dedicated formatter or linter is configured; the frontend build checks unused declarations and switch fallthrough.
+Follow existing code: Python uses four-space indentation, type hints, and snake_case functions/modules; classes use PascalCase. TypeScript/TSX uses two-space indentation, double quotes, semicolons, camelCase variables, and PascalCase component filenames. Keep shared API types in `types.ts`. Style with Tailwind utilities and the theme tokens in `app.css` (for example `bg-aubergine`, `text-muted-foreground`, `narrow:` for the 900px breakpoint) rather than new CSS; reuse shadcn primitives from `components/ui/` and add missing ones with `npx shadcn@latest add <name>`. Tool UI elements are added with `npx shadcn@latest add @assistant-ui/elements-<name> --yes` and moved into `components/assistant-ui/elements/` (see CLAUDE.md for the cleanup steps). No dedicated formatter or linter is configured; the frontend build checks unused declarations and switch fallthrough.
 
 ## Testing Guidelines
 

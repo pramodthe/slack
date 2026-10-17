@@ -166,7 +166,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
   const waiting = tasks.filter((t) => t.status === "waiting").length;
 
   return (
-    <section className="tool-ui mx-6 mb-2 flex max-h-[32vh] flex-col overflow-hidden rounded-lg border border-border bg-background text-[13px]">
+    <section className="mx-6 mb-2 flex max-h-[32vh] flex-col overflow-hidden rounded-lg border border-border bg-background text-[13px]">
       <button
         type="button"
         aria-expanded={expanded}

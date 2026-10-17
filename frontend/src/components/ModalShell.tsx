@@ -21,7 +21,7 @@ export default function ModalShell({
       <DialogContent
         aria-describedby={undefined}
         className={cn(
-          "tool-ui flex max-h-[calc(100vh-48px)] flex-col gap-0 rounded-[10px] border-0 p-0 shadow-[0_20px_60px_rgba(0,0,0,0.35)]",
+          "flex max-h-[calc(100vh-48px)] flex-col gap-0 rounded-[10px] border-0 p-0 shadow-[0_20px_60px_rgba(0,0,0,0.35)]",
           wide ? "sm:max-w-[680px]" : "sm:max-w-[480px]",
         )}
       >

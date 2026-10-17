@@ -139,7 +139,7 @@ export default function ComputerPanel({ taskId, agent, working, others, onSwitch
 
   return (
     <aside
-      className="tool-ui border-border flex min-h-0 w-[min(560px,44vw)] shrink-0 flex-col border-l bg-[#fafafa] text-[13px] narrow:fixed narrow:inset-y-0 narrow:right-0 narrow:z-20 narrow:w-[min(100vw,560px)] narrow:shadow-[-4px_0_16px_rgba(0,0,0,0.2)]"
+      className="border-border flex min-h-0 w-[min(560px,44vw)] shrink-0 flex-col border-l bg-[#fafafa] text-[13px] narrow:fixed narrow:inset-y-0 narrow:right-0 narrow:z-20 narrow:w-[min(100vw,560px)] narrow:shadow-[-4px_0_16px_rgba(0,0,0,0.2)]"
       aria-label={`${name}'s computer`}
     >
       <header className="border-border bg-background flex min-h-[58px] items-center gap-2.5 border-b px-4 py-3">

@@ -99,7 +99,7 @@ export default function CreateAgentModal({
               <SelectTrigger id={`${id}-model`} className="w-full">
                 <SelectValue placeholder="Choose a model" />
               </SelectTrigger>
-              <SelectContent position="popper" className="tool-ui">
+              <SelectContent position="popper">
                 {state.models.map((m) => (
                   <SelectItem key={m.id} value={m.id}>
                     {m.label}

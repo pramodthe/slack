@@ -16,7 +16,7 @@ import { AgentStatus } from "./assistant-ui/elements/agent-status";
 import type { Modal, OpenComputer } from "./Workspace";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
-const titleClass = "truncate text-lg font-black";
+const titleClass = "truncate text-[18px] font-black";
 const topicClass = "text-muted-foreground truncate text-[13px]";
 
 function formatTime(iso: string) {
@@ -38,7 +38,7 @@ function MessageContent({ message, settled }: { message: Message; settled: boole
   if (message.handoff && targets.length > 0) {
     const reason = message.content.replace(/^@\S+\s*/, "");
     return (
-      <div className="tool-ui pt-1">
+      <div className="pt-1">
         <AgentHandoff className="max-w-2xl" from={message.author_name} to={targets[0]} reason={reason} carried={[]} settled={settled} />
       </div>
     );
@@ -308,7 +308,7 @@ export default function ChannelView({
         </div>
       </header>
 
-      <div className="tool-ui flex-1 overflow-y-auto pt-3 pb-1" ref={scroller} onScroll={onScroll}>
+      <div className="flex-1 overflow-y-auto pt-3 pb-1" ref={scroller} onScroll={onScroll}>
         {!messages && <div className="text-muted-foreground p-6 text-center">Loading messages…</div>}
         {messages && messages.length === 0 && (
           <div className="flex flex-col gap-1.5 p-5">
@@ -347,7 +347,7 @@ export default function ChannelView({
 
       <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} openComputer={openComputer} />
 
-      <div className="tool-ui relative flex h-8 shrink-0 items-center gap-1.5 overflow-x-auto px-5 [scrollbar-width:none]" aria-live="polite">
+      <div className="relative flex h-8 shrink-0 items-center gap-1.5 overflow-x-auto px-5 [scrollbar-width:none]" aria-live="polite">
         {working.map((item) => (
           <AgentStatus
             key={item.key}

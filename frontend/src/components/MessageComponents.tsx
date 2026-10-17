@@ -16,7 +16,7 @@ function Component({ component }: { component: MessageComponent }) {
 
 export default function MessageComponents({ components }: { components: MessageComponent[] }) {
   return (
-    <div className="tool-ui flex max-w-2xl flex-col gap-2 pt-1.5">
+    <div className="flex max-w-2xl flex-col gap-2 pt-1.5">
       {components.map((component) => (
         <Component key={component.id} component={component} />
       ))}
