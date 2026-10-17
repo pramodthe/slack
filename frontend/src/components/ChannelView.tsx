@@ -8,6 +8,7 @@ import TaskPanel from "./TaskPanel";
 import RichText, { MentionNames, SourcesPill, linksIn, mentionClass } from "./RichText";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import MessageComponents from "./MessageComponents";
 import ApprovalRequest from "./ApprovalRequest";
 import { AgentHandoff } from "./assistant-ui/elements/agent-handoff";
@@ -15,6 +16,8 @@ import { AgentStatus } from "./assistant-ui/elements/agent-status";
 import type { Modal, OpenComputer } from "./Workspace";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
+const titleClass = "truncate text-lg font-black";
+const topicClass = "text-muted-foreground truncate text-[13px]";
 
 function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -250,27 +253,30 @@ export default function ChannelView({
   const headerComputer = computers.find((c) => c.agent_working) ?? computers[0];
 
   return (
-    <section className="channel">
-      <header className="channel-header">
+    <section className="flex min-w-0 flex-1 flex-col">
+      <header className="border-border flex min-h-[58px] items-center justify-between gap-3 border-b px-5 py-2.5">
         {dmAgent ? (
-          <div className="dm-title">
+          <div className="flex min-w-0 items-center gap-2.5">
             <Avatar name={dmAgent.name} kind="agent" role={dmAgent.role} />
-            <div>
-              <div className="channel-title">{dmAgent.name}</div>
-              <div className="channel-topic">
+            <div className="min-w-0">
+              <div className={titleClass}>{dmAgent.name}</div>
+              <div className={topicClass}>
                 {dmAgent.role_label} · {dmAgent.status.state} · only you can see this conversation
               </div>
             </div>
           </div>
         ) : (
-          <div>
-            <div className="channel-title"># {channel.name}</div>
-            {channel.topic && <div className="channel-topic">{channel.topic}</div>}
+          <div className="min-w-0">
+            <div className={titleClass}># {channel.name}</div>
+            {channel.topic && <div className={topicClass}>{channel.topic}</div>}
           </div>
         )}
-        <div className="channel-actions">
-          <label className="toggle" title="Show messages agents send to each other">
-            <input type="checkbox" checked={showChatter} onChange={(e) => setShowChatter(e.target.checked)} />
+        <div className="flex shrink-0 items-center gap-3">
+          <label
+            className="text-muted-foreground flex cursor-pointer items-center gap-1.5 text-[13px]"
+            title="Show messages agents send to each other"
+          >
+            <Checkbox checked={showChatter} onCheckedChange={(checked) => setShowChatter(checked === true)} />
             Agent chatter
           </label>
           {headerComputer && !computerOpen && (
@@ -285,19 +291,25 @@ export default function ChannelView({
             </Button>
           )}
           {dmAgent ? (
-            <button className="chip" onClick={() => openModal({ kind: "agent", agentId: dmAgent.id })}>
+            <Button variant="chip" size="chip" onClick={() => openModal({ kind: "agent", agentId: dmAgent.id })}>
               ⚙ Settings
-            </button>
+            </Button>
           ) : (
-            <button className={`chip ${showMembers ? "active" : ""}`} onClick={onToggleMembers}>
+            <Button
+              variant="chip"
+              size="chip"
+              className={cn(showMembers && "bg-muted")}
+              aria-pressed={showMembers}
+              onClick={onToggleMembers}
+            >
               👤 {humanCount} · 🤖 {agentCount}
-            </button>
+            </Button>
           )}
         </div>
       </header>
 
       <div className="tool-ui flex-1 overflow-y-auto pt-3 pb-1" ref={scroller} onScroll={onScroll}>
-        {!messages && <div className="muted center">Loading messages…</div>}
+        {!messages && <div className="text-muted-foreground p-6 text-center">Loading messages…</div>}
         {messages && messages.length === 0 && (
           <div className="flex flex-col gap-1.5 p-5">
             {dmAgent ? (

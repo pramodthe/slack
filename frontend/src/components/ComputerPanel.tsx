@@ -5,6 +5,7 @@ import type { Agent, ComputerState, FileEntry, LiveView } from "../types";
 import { cn, parseUtc } from "@/lib/utils";
 import Avatar from "./Avatar";
 import { ComputerUse, type ComputerStep } from "./assistant-ui/elements/computer-use";
+import StatusDot from "./StatusDot";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
@@ -134,7 +135,7 @@ export default function ComputerPanel({ taskId, agent, working, others, onSwitch
   const viewOnly = !control?.mine;
   const liveSrc = live && `${live.url}?autoconnect=true&resize=scale&reconnect=true&view_only=${viewOnly}`;
   const status = computer?.status.replaceAll("_", " ") ?? "loading";
-  const dot = computer?.status === "running" ? "bg-online border-online" : computer?.error ? "bg-destructive border-destructive" : "border-[#9a8a9a]";
+  const dot = computer?.status === "running" ? "online" : computer?.error ? "error" : "stopped";
 
   return (
     <aside
@@ -146,7 +147,7 @@ export default function ComputerPanel({ taskId, agent, working, others, onSwitch
         <div className="min-w-0 flex-1">
           <div className="text-[15px] font-black">{name}'s computer</div>
           <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
-            <span className={cn("size-[9px] shrink-0 rounded-full border-[1.5px]", dot)} />
+            <StatusDot state={dot} />
             <span className="capitalize">{status}</span>
             {working && <span className="animate-pulse font-bold text-[#1d9b5f]">● Working</span>}
           </div>

@@ -93,12 +93,12 @@ export default function Workspace({
   const shown = computer && computers.find((c) => c.agent_id === computer.agentId);
 
   return (
-    <div className="workspace">
+    <div className="tool-ui flex h-full">
       <Sidebar state={state} dispatch={dispatch} openModal={setModal} onSignOut={onSignOut} />
-      <main className="main">
+      <main className="flex min-w-0 flex-1 flex-col">
         <SetupBanner state={state} connected={connected} />
         {channel ? (
-          <div className="channel-area">
+          <div className="flex min-h-0 flex-1">
             <ChannelView
               dispatch={dispatch}
               key={channel.id}
@@ -131,7 +131,7 @@ export default function Workspace({
             )}
           </div>
         ) : (
-          <div className="empty">Pick or create a channel to get started.</div>
+          <div className="text-muted-foreground grid h-full place-items-center">Pick or create a channel to get started.</div>
         )}
       </main>
       {modal?.kind === "new-channel" && (

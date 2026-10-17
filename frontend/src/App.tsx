@@ -85,6 +85,6 @@ export default function App() {
       />
     );
   }
-  if (!boot) return <div className="loading">Loading workspace…</div>;
+  if (!boot) return <div className="text-muted-foreground grid h-full place-items-center">Loading workspace…</div>;
   return <Loaded key={boot.me.id} boot={boot} onSignOut={signOut} />;
 }
