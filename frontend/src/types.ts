@@ -78,7 +78,18 @@ export interface Message {
   mentions: Mention[];
   to_humans: boolean;
   components: MessageComponent[];
+  approval: MessageApproval | null;
+  handoff: boolean;
   created_at: string;
+}
+
+export interface MessageApproval {
+  id: string;
+  status: "pending" | "approved" | "denied";
+  action: string;
+  details: string;
+  decided_by: string;
+  note: string;
 }
 
 export type MessageComponent =
@@ -113,8 +124,10 @@ export interface Task {
   status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled";
   progress: string;
   error: string | null;
+  attempts: number;
   cancel_requested: boolean;
   delivery_status: string;
+  created_at: string;
   updated_at: string;
 }
 
@@ -128,20 +141,13 @@ export interface TaskDetail extends Task {
   artifacts: Artifact[];
 }
 
-export interface Approval {
-  id: string;
-  task_id: string;
-  agent_id: number;
-  action: string;
-  details: string;
-}
-
 export interface Schedule {
   id: number;
   agent_id: number;
   prompt: string;
   when: string;
   next_run_at: string | null;
+  last_run_at: string | null;
 }
 
 export interface Memory {
@@ -223,6 +229,7 @@ export interface Draft {
 
 export type ServerEvent =
   | { type: "message"; message: Message }
+  | { type: "message_updated"; message: Message }
   | ({ type: "draft" } & Draft)
   | { type: "channel"; channel: Channel }
   | { type: "user"; user: User }

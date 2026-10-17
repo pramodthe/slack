@@ -77,6 +77,11 @@ function applyEvent(state: State, event: ServerEvent): State {
           : { ...state.unread, [message.channel_id]: (state.unread[message.channel_id] ?? 0) + 1 },
       };
     }
+    case "message_updated": {
+      const loaded = state.messages[event.message.channel_id];
+      if (!loaded?.some((m) => m.id === event.message.id)) return state;
+      return { ...state, messages: { ...state.messages, [event.message.channel_id]: mergeMessages(loaded, [event.message]) } };
+    }
     case "channel":
       return { ...state, channels: { ...state.channels, [event.channel.id]: event.channel } };
     case "user":

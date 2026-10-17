@@ -127,7 +127,7 @@ Screenshots and exported files can contain task data. Desktop inspection, live v
 
 ## Approvals, schedules, and integrations
 
-**Approvals.** Agents call `request_approval` before actions with external effects. The task pauses with status `waiting`, posts an "Approval needed" message, and frees its worker slot. Channel members approve or deny in the Agent tasks panel; the task resumes from its checkpoint with the decision, including inside a helper such as the computer helper. Waiting tasks can be cancelled.
+**Approvals.** Agents call `request_approval` before actions with external effects. The task pauses with status `waiting`, posts an "Approval needed" message, and frees its worker slot. Channel members approve or deny on that message, which shows the decision once it is made; the task resumes from its checkpoint with the decision, including inside a helper such as the computer helper. Waiting tasks can be cancelled.
 
 **Schedules.** Ask an agent for something later or on a cadence (for example "every weekday at 9am, summarize AI news"). It calls `schedule_task` with `once`, `daily`, `weekdays`, `weekly`, or `interval` (at least 15 minutes) in an IANA timezone (`DEFAULT_TIMEZONE` when unspecified). The worker queues each run as a normal task in that channel. Runs missed while the worker was stopped fire once on restart rather than backfilling. A channel can hold 20 active schedules; cancel them from the task panel or by asking the agent.
 

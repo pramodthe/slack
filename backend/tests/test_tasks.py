@@ -436,6 +436,7 @@ def test_handoffs_and_task_activity_reach_websocket(job):
                 if event["type"] == "channel" and event["channel"]["id"] == task.channel_id:
                     seen_member = seen_member or writer.id in event["channel"]["agent_ids"]
                 if event["type"] == "message" and event["message"]["content"] == f"@{writer.name} Live check":
+                    assert event["message"]["handoff"] is True and event["message"]["approval"] is None
                     seen_message = True
                 if event["type"] == "task_activity" and event["task"]["id"] == child_id:
                     assert event["task"]["status"] == "queued" and event["task"]["agent_id"] == writer.id
@@ -715,6 +716,46 @@ def test_cancelling_a_waiting_task_closes_its_approval(tmp_path, job):
     model = RecordingModel(responses=[AIMessage(content="Not submitted.")])
     assert run_attempt(tmp_path, task, model).status == "completed"
     assert any('"approved": false' in r and "Task cancelled" in r for r in tool_results(model))
+
+
+def test_approval_messages_carry_the_decision(tmp_path, job):
+    task, _, user = job
+    run_attempt(tmp_path, task, ScriptedModel(responses=[approval_call("inline-approval")]))
+    headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
+
+    def approval_message(client):
+        rows = client.get(f"/api/channels/{task.channel_id}/messages", headers=headers).json()
+        return next(m for m in rows if m["approval"])
+
+    with TestClient(app) as client:
+        listed = approval_message(client)
+        assert listed["handoff"] is False
+        assert listed["approval"] == {"id": listed["approval"]["id"], "status": "pending",
+                                      "action": "Submit the signup form on example.com",
+                                      "details": "Email: test@example.com", "decided_by": "", "note": ""}
+        with client.websocket_connect(f"/ws?token={issue_token(user.id)}") as ws:
+            client.post(f"/api/approvals/{listed['approval']['id']}", json={"approve": True}, headers=headers)
+            event = ws.receive_json()
+            while event["type"] != "message_updated":
+                event = ws.receive_json()
+        assert event["message"]["id"] == listed["id"]
+        assert event["message"]["approval"]["status"] == "approved"
+        assert event["message"]["approval"]["decided_by"] == "Tester"
+        assert approval_message(client)["approval"]["status"] == "approved"
+
+
+def test_cancelling_republishes_the_closed_approval(tmp_path, job):
+    task, _, user = job
+    run_attempt(tmp_path, task, ScriptedModel(responses=[approval_call("cancel-inline")]))
+    headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={issue_token(user.id)}") as ws:
+            client.post(f"/api/tasks/{task.id}/cancel", headers=headers)
+            event = ws.receive_json()
+            while event["type"] != "message_updated":
+                event = ws.receive_json()
+    assert event["message"]["approval"]["status"] == "denied"
+    assert event["message"]["approval"]["note"] == "Task cancelled"
 
 
 def test_context_shows_agents_by_display_name_not_band_handle(job):

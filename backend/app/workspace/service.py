@@ -17,8 +17,8 @@ from app.band.org import BandOrg
 from app.config import settings
 from app.workspace.events import bus
 from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
-                                    MessageComponent, MessageDraft, OutsideAgent, Schedule, TaskSandbox, TeammateRequest, User, db,
-                                    dm_owner)
+                                    MessageComponent, MessageDraft, OutsideAgent, Schedule, TaskApproval, TaskSandbox,
+                                    TeammateRequest, User, db, dm_owner)
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context, display_names
 
@@ -43,7 +43,8 @@ def serialize_user(user: User) -> dict[str, Any]:
     }
 
 
-def serialize_message(message: Message, components: Sequence[dict[str, Any]] = ()) -> dict[str, Any]:
+def serialize_message(message: Message, components: Sequence[dict[str, Any]] = (),
+                      approval: TaskApproval | None = None) -> dict[str, Any]:
     return {
         "id": message.id,
         "channel_id": message.channel_id,
@@ -54,8 +55,23 @@ def serialize_message(message: Message, components: Sequence[dict[str, Any]] = (
         "mentions": message.mentions,
         "to_humans": message.to_humans,
         "components": list(components),
+        "approval": {"id": approval.id, "status": approval.status, "action": approval.action,
+                     "details": approval.details, "decided_by": approval.decided_by,
+                     "note": approval.note} if approval else None,
+        "handoff": (message.band_message_id or "").startswith("handoff:"),
         "created_at": message.created_at.isoformat(),
     }
+
+
+def serialize_messages(session: Session, messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Messages with their attached components and, for approval requests, the decision so far."""
+    components = components_for(session, [m.id for m in messages])
+    approval_ids = {m.id: m.band_message_id.removeprefix("approval:") for m in messages
+                    if (m.band_message_id or "").startswith("approval:")}
+    approvals = {a.id: a for a in session.exec(
+        select(TaskApproval).where(TaskApproval.id.in_(approval_ids.values()))).all()} if approval_ids else {}
+    return [serialize_message(m, components.get(m.id, ()), approvals.get(approval_ids.get(m.id, "")))
+            for m in messages]
 
 
 def components_for(session: Session, message_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
@@ -151,15 +167,14 @@ class AppService:
                         | Message.band_message_id.startswith("approval:"))).all()
                     working = session.exec(select(AgentTask).where(
                         AgentTask.status.in_(["queued", "running", "waiting"]))).all()
-                    components = components_for(session, [m.id for m in messages])
+                    payloads = serialize_messages(session, sorted(messages, key=lambda m: m.id))
                 # Updates go before replies and removals after, so a draft never reappears or leaves a gap.
                 for task_id, draft in written.items():
                     if drafts.get(task_id) != draft:
                         await bus.publish({"type": "draft", **draft})
-                for message in sorted(messages, key=lambda m: m.id):
-                    await bus.publish({"type": "message",
-                                       "message": serialize_message(message, components.get(message.id, ()))})
-                    after_id = message.id
+                for payload in payloads:
+                    await bus.publish({"type": "message", "message": payload})
+                    after_id = payload["id"]
                 # The worker adds hand-off teammates as channel members; refresh member lists once per channel.
                 for channel_id in {m.channel_id for m in messages if (m.band_message_id or "").startswith("handoff:")}:
                     await self.publish_channel(channel_id)
@@ -598,6 +613,15 @@ class AppService:
             payload = serialize_message(message)
         await bus.publish({"type": "message", "message": payload})
         return payload
+
+    async def publish_approvals(self, approval_ids: Sequence[str]) -> None:
+        """Re-send approval request messages so open clients swap the buttons for the decision."""
+        with db() as session:
+            messages = session.exec(select(Message).where(
+                Message.band_message_id.in_([f"approval:{a}" for a in approval_ids]))).all()
+            payloads = serialize_messages(session, messages)
+        for payload in payloads:
+            await bus.publish({"type": "message_updated", "message": payload})
 
     async def system_message(self, channel_id: int, content: str) -> None:
         await self._store(

@@ -24,7 +24,7 @@ from daytona import DaytonaError
 
 from app.computer import (TRANSFER_LIMIT, ComputerUnavailable, TaskComputer, active_control, computer_key,
                           release_control, sandbox_record, take_control)
-from app.workspace.service import ServiceError, components_for, serialize_message, serialize_user, service
+from app.workspace.service import ServiceError, serialize_messages, serialize_user, service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 for noisy in ("httpx", "httpx2"):
@@ -237,8 +237,7 @@ async def list_messages(
     if before:
         query = query.where(Message.id < before)
     rows = session.exec(query.order_by(Message.id.desc()).limit(min(limit, 200))).all()
-    components = components_for(session, [m.id for m in rows])
-    return [serialize_message(m, components.get(m.id, ())) for m in reversed(rows)]
+    return serialize_messages(session, list(reversed(rows)))
 
 
 class MessageBody(BaseModel):
@@ -548,10 +547,14 @@ async def cancel_task(task_id: str, user: User = Depends(current_user), session:
                          progress=case((idle, "Cancelled"), else_="Cancellation requested"),
                          updated_at=utcnow()))
     # Close the task's open approval requests so their cards disappear and cannot be approved later.
+    closed = session.exec(select(TaskApproval.id).where(TaskApproval.task_id == task_id,
+                                                        TaskApproval.status == "pending")).all()
     session.exec(update(TaskApproval).where(TaskApproval.task_id == task_id, TaskApproval.status == "pending")
                  .values(status="denied", note="Task cancelled", decided_by=user.display_name, decided_at=utcnow()))
     session.commit()
     session.expire_all()
+    if closed:
+        await service.publish_approvals(closed)
     return serialize_task(session.get(AgentTask, task_id))
 
 
@@ -594,6 +597,7 @@ async def decide(approval_id: str, body: DecisionBody, user: User = Depends(curr
     if decided is None:
         raise HTTPException(409, "This request was already decided or its task is no longer waiting")
     verdict = "approved" if body.approve else "denied"
+    await service.publish_approvals([approval_id])
     await service.system_message(decided.channel_id, f"{user.display_name} {verdict}: {decided.action}"
                                  + (f" ({body.note})" if body.note else ""))
     return decided

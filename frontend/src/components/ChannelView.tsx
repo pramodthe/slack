@@ -6,6 +6,9 @@ import Composer from "./Composer";
 import TaskPanel from "./TaskPanel";
 import RichText, { MentionNames } from "./RichText";
 import MessageComponents from "./MessageComponents";
+import ApprovalRequest from "./ApprovalRequest";
+import { AgentHandoff } from "./assistant-ui/elements/agent-handoff";
+import { AgentStatus } from "./assistant-ui/elements/agent-status";
 import type { Modal, OpenComputer } from "./Workspace";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -23,20 +26,41 @@ function formatDay(iso: string) {
 
 const isChatter = (m: Message) => m.author_type === "agent" && !m.to_humans;
 
+function MessageContent({ message, settled }: { message: Message; settled: boolean }) {
+  const targets = message.mentions.filter((m) => m.type !== "human").map((m) => m.name);
+  if (message.approval) return <ApprovalRequest approval={message.approval} agentName={message.author_name} />;
+  if (message.handoff && targets.length > 0) {
+    const reason = message.content.replace(/^@\S+\s*/, "");
+    return (
+      <div className="tool-ui pt-1">
+        <AgentHandoff className="max-w-2xl" from={message.author_name} to={targets[0]} reason={reason} carried={[]} settled={settled} />
+      </div>
+    );
+  }
+  return (
+    <>
+      {isChatter(message) && targets.length > 0 && <div className="chatter-label">to {targets.join(", ")}</div>}
+      <RichText text={message.content} />
+      {message.components?.length > 0 && <MessageComponents components={message.components} />}
+    </>
+  );
+}
+
 function MessageRow({
   message,
   state,
   compact,
+  settled,
   openModal,
 }: {
   message: Message;
   state: State;
   compact: boolean;
+  settled: boolean;
   openModal: (m: Modal) => void;
 }) {
   const agent = message.author_type === "agent" && message.author_id != null ? state.agents[message.author_id] : null;
   const chatter = isChatter(message);
-  const targets = message.mentions.filter((m) => m.type !== "human").map((m) => m.name);
 
   return (
     <div className={`msg ${compact ? "compact" : ""} ${chatter ? "chatter" : ""} msg-${message.author_type}`}>
@@ -62,9 +86,7 @@ function MessageRow({
             <span className="msg-time">{formatTime(message.created_at)}</span>
           </div>
         )}
-        {chatter && targets.length > 0 && <div className="chatter-label">to {targets.join(", ")}</div>}
-        <RichText text={message.content} />
-        {message.components?.length > 0 && <MessageComponents components={message.components} />}
+        <MessageContent message={message} settled={settled} />
       </div>
     </div>
   );
@@ -120,14 +142,26 @@ export default function ChannelView({
   const hiddenCount = (messages?.length ?? 0) - visible.length;
   const drafts = Object.values(state.drafts[channel.id] ?? {}).filter((d) => state.agents[d.agent_id]);
   const draftLength = drafts.reduce((total, d) => total + d.content.length, 0);
-  const typingNames = (state.typing[channel.id] ?? []).map((id) => state.agents[id]?.name).filter(Boolean);
-  const working = [
-    ...typingNames.map((name) => `${name} is working…`),
+  const working: { key: string; state: "working" | "waiting"; label: string }[] = [
+    ...(state.typing[channel.id] ?? [])
+      .filter((id) => state.agents[id])
+      .map((id) => ({ key: `typing-${id}`, state: "working" as const, label: `${state.agents[id].name} is working…` })),
     ...Object.values(state.activity[channel.id] ?? {})
       .filter((t) => state.agents[t.agent_id])
-      .map((t) => `${state.agents[t.agent_id].name}: ${t.status === "queued" ? "waiting for its turn"
-        : t.status === "waiting" ? "waiting for your approval" : t.progress}`),
+      .map((t) => ({
+        key: t.id,
+        state: t.status === "running" ? "working" as const : "waiting" as const,
+        label: `${state.agents[t.agent_id].name}: ${t.status === "queued" ? "waiting for its turn"
+          : t.status === "waiting" ? "waiting for your approval" : t.progress}`,
+      })),
   ];
+  // A hand-off is settled once its teammate has posted after it.
+  const settledHandoffs = new Set<number>();
+  const laterAuthors = new Set<string>();
+  for (const m of [...(messages ?? [])].reverse()) {
+    if (m.handoff && m.mentions.some((t) => laterAuthors.has(t.name))) settledHandoffs.add(m.id);
+    laterAuthors.add(m.author_name);
+  }
 
   useEffect(() => localStorage.setItem("show-chatter", showChatter ? "1" : "0"), [showChatter]);
 
@@ -159,7 +193,9 @@ export default function ChannelView({
       prev.author_name === m.author_name &&
       isChatter(prev) === isChatter(m) &&
       new Date(m.created_at).getTime() - new Date(prev.created_at).getTime() < GROUP_WINDOW_MS;
-    rows.push(<MessageRow key={m.id} message={m} state={state} compact={compact} openModal={openModal} />);
+    rows.push(
+      <MessageRow key={m.id} message={m} state={state} compact={compact} settled={settledHandoffs.has(m.id)} openModal={openModal} />,
+    );
     prev = m;
   }
 
@@ -256,17 +292,16 @@ export default function ChannelView({
 
       <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} openComputer={openComputer} />
 
-      <div className="typing-bar">
-        {working.length > 0 && (
-          <>
-            <span className="typing-dots">
-              <i />
-              <i />
-              <i />
-            </span>
-            <span className="typing-text">{working.join(" · ")}</span>
-          </>
-        )}
+      <div className="tool-ui flex h-8 shrink-0 items-center gap-1.5 overflow-x-auto px-5 [scrollbar-width:none]" aria-live="polite">
+        {working.map((item) => (
+          <AgentStatus
+            key={item.key}
+            className="shrink-0 py-1 ps-2.5 pe-3"
+            state={item.state}
+            label={item.label}
+            trailing={null}
+          />
+        ))}
       </div>
 
       <Composer state={state} channel={channel} />
