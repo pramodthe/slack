@@ -132,6 +132,16 @@ function applyEvent(state: State, event: ServerEvent): State {
         drafts: { ...state.drafts, [draft.channel_id]: { ...state.drafts[draft.channel_id], [draft.task_id]: draft } },
       };
     }
+    case "draft_append": {
+      const current = state.drafts[event.channel_id]?.[event.task_id];
+      // Only extend the exact text the append was cut from; the server resends the full draft regularly.
+      if (!current || current.content.length !== event.offset) return state;
+      const draft = { ...current, content: current.content + event.text };
+      return {
+        ...state,
+        drafts: { ...state.drafts, [event.channel_id]: { ...state.drafts[event.channel_id], [event.task_id]: draft } },
+      };
+    }
   }
 }
 

@@ -14,6 +14,7 @@ from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 import app.tasks.drafts as drafts
+import app.workspace.service as service_module
 from app.auth import issue_token
 from app.main import app
 from app.persistence.models import AgentTask, Message, MessageDraft, db
@@ -215,6 +216,27 @@ def test_drafts_reach_websocket_and_clear_when_the_reply_lands(job):
                     assert event["content"] == ""
                     seen.append("cleared")
             assert seen == ["message", "cleared"]
+
+
+def test_drafts_stream_appended_text_and_resync_in_full(job, monkeypatch):
+    task, _, user = job
+    monkeypatch.setattr(service_module, "DRAFT_RESYNC", 2)
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/ws?token={issue_token(user.id)}") as ws:
+            def written(content: str) -> dict:
+                save_draft(task, content)
+                event = ws.receive_json()
+                while not (event["type"] in ("draft", "draft_append") and event["task_id"] == task.id):
+                    event = ws.receive_json()
+                return event
+
+            base = {"task_id": task.id, "channel_id": task.channel_id, "agent_id": task.agent_id}
+            assert written("😀 Hello") == {"type": "draft", **base, "content": "😀 Hello"}
+            # The emoji is two UTF-16 units in the browser, so the offset is 8, not Python's 7.
+            assert written("😀 Hello wor") == {"type": "draft_append", **base, "offset": 8, "text": " wor"}
+            assert written("😀 Hello world") == {"type": "draft_append", **base, "offset": 12, "text": "ld"}
+            assert written("😀 Hello world!") == {"type": "draft", **base, "content": "😀 Hello world!"}
+            assert written("Rewritten") == {"type": "draft", **base, "content": "Rewritten"}
 
 
 def test_code_execution_text_before_the_tool_is_not_part_of_the_answer(job):

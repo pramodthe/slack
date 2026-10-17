@@ -234,6 +234,87 @@ def test_teammate_requests_wait_until_band_has_connected(team, monkeypatch):
     assert _status(request_id).status == "created"
 
 
+def test_simultaneous_requests_cannot_duplicate_a_name_or_pass_the_limit(team, monkeypatch):
+    _, task, master, channel, _ = team
+
+    def passed_checks(name: str, call_id: str) -> int:
+        """A request inserted as if another task passed the up-front checks at the same moment."""
+        with db() as session:
+            request = TeammateRequest(source_key=f"{task.id}:{call_id}", task_id=task.id, channel_id=channel.id,
+                                      requested_by_agent_id=master.id, name=name, role="researcher",
+                                      model=master.model)
+            session.add(request)
+            session.commit()
+            return request.id
+
+    def settle(request_id: int):
+        with db() as session:
+            return teammates_module._settle_race(session, session.get(TeammateRequest, request_id))
+
+    first, second = passed_checks("Scout", "a"), passed_checks("scout", "b")
+    assert settle(first) == first
+    assert settle(second) == first
+    assert _status(first).status == "pending" and _status(second).status == "failed"
+    monkeypatch.setattr(teammates_module, "settings", dataclasses.replace(settings, max_agent_teammates=1))
+    third = passed_checks("Quill", "c")
+    assert "limit" in settle(third)["error"]
+    assert _status(third).status == "failed"
+
+
+def test_registrations_are_serialized_and_names_are_case_insensitive(team, monkeypatch):
+    svc, _, _, _, _ = team
+    register = svc.org.register_agent
+
+    async def slow_register(name, description):
+        await asyncio.sleep(0.05)  # Band takes a while, so unserialized registrations would interleave
+        return await register(name, description)
+    monkeypatch.setattr(svc.org, "register_agent", slow_register)
+
+    async def scenario():
+        return await asyncio.gather(*(svc.create_agent(name=name, role="researcher", instructions="", model="m")
+                                      for name in ("Scout", "scout")), return_exceptions=True)
+    made, refused = asyncio.run(scenario())
+    assert made.name == "Scout"
+    assert isinstance(refused, ServiceError) and refused.status == 409
+    assert svc.org.registered == ["Master", "Scout"]
+
+
+def test_local_and_outside_agents_cannot_share_a_name(team):
+    svc, task, _, channel, user = team
+    _tom(channel.id)
+    assert "outside Band agent" in teammates_module._request(task, name="tom", role="writer", instructions="",
+                                                             call_id="shadow")["error"]
+    with pytest.raises(ServiceError, match="outside Band agent"):
+        asyncio.run(svc.create_agent(name="TOM", role="writer", instructions="", model="m"))
+    with db() as session:
+        session.delete(session.get(OutsideAgent, (channel.id, "peer-tom")))
+        session.add(AgentProfile(name="tom", role="writer", band_agent_id="agent-local-tom",
+                                 band_api_key_enc=encrypt_secret("k")))
+        session.commit()
+    with pytest.raises(ServiceError, match="already named"):
+        asyncio.run(svc.invite_outside_agent(user, channel.id, "peer-tom"))
+
+
+def test_removing_an_outside_agent_needs_band_to_confirm(team, monkeypatch):
+    svc, _, _, channel, _ = team
+    _tom(channel.id)
+
+    async def refuse(room_id, band_id):
+        raise RuntimeError("band down")
+    monkeypatch.setattr(svc.org, "remove_participant", refuse)
+    with pytest.raises(ServiceError) as failed:
+        asyncio.run(svc.remove_outside_agent(channel.id, "peer-tom"))
+    assert failed.value.status == 502
+    rest, svc.org._rest = svc.org._rest, None
+    with pytest.raises(ServiceError) as offline:
+        asyncio.run(svc.remove_outside_agent(channel.id, "peer-tom"))
+    assert offline.value.status == 503
+    svc.org._rest = rest
+    with db() as session:
+        assert session.get(OutsideAgent, (channel.id, "peer-tom"))
+    assert [m.content for m in _system(channel.id)] == []
+
+
 def test_master_creates_a_teammate_then_hands_off_to_it(tmp_path, team):
     svc, task, master, _, _ = team
     model = ScriptedModel(responses=[

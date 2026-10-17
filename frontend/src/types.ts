@@ -125,6 +125,7 @@ export interface Draft {
 export type ServerEvent =
   | { type: "message"; message: Message }
   | ({ type: "draft" } & Draft)
+  | { type: "draft_append"; task_id: string; channel_id: number; agent_id: number; offset: number; text: string }
   | { type: "channel"; channel: Channel }
   | { type: "user"; user: User }
   | { type: "presence"; user_id: number; online: boolean }

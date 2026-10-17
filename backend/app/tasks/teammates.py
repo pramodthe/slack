@@ -52,6 +52,9 @@ def _request(task: AgentTask, *, name: str, role: str, instructions: str, call_i
         if same:
             return {"status": "exists", "teammate": same.name, "role": role_label(same.role),
                     "note": f"{same.name} already exists; reuse it with ask_teammate instead of creating another."}
+        if outsider := session.exec(select(OutsideAgent).where(func.lower(OutsideAgent.name) == name.lower())).first():
+            return {"error": f"{outsider.name} is an outside Band agent. Hand off to it with ask_teammate, "
+                             "or choose another name."}
         in_progress = session.exec(select(TeammateRequest).where(
             func.lower(TeammateRequest.name) == name.lower(),
             TeammateRequest.status.in_(["pending", "creating"]))).first()
@@ -62,8 +65,7 @@ def _request(task: AgentTask, *, name: str, role: str, instructions: str, call_i
         waiting = session.exec(select(func.count()).select_from(TeammateRequest).where(
             TeammateRequest.status.in_(["pending", "creating"]))).one()
         if made + waiting >= settings.max_agent_teammates:
-            return {"error": f"Agents have already created {settings.max_agent_teammates} teammates, the workspace "
-                             "limit. Reuse an existing teammate or ask a person to create one."}
+            return _limit_reached()
         requester = session.get(AgentProfile, task.agent_id)
         request = TeammateRequest(source_key=source_key, task_id=task.id, channel_id=task.channel_id,
                                   requested_by_agent_id=task.agent_id, name=name, role=key,
@@ -75,7 +77,33 @@ def _request(task: AgentTask, *, name: str, role: str, instructions: str, call_i
         except IntegrityError:
             session.rollback()
             return session.exec(select(TeammateRequest).where(TeammateRequest.source_key == source_key)).one().id
+        return _settle_race(session, request)
+
+
+def _settle_race(session, request: TeammateRequest) -> dict | int:
+    """Tasks run in parallel, so two requests can pass the checks at once; the earliest one wins."""
+    active = TeammateRequest.status.in_(["pending", "creating"])
+    earlier = session.exec(select(TeammateRequest).where(
+        active, TeammateRequest.id < request.id, func.lower(TeammateRequest.name) == request.name.lower())).first()
+    made = session.exec(select(func.count()).select_from(AgentProfile).where(
+        AgentProfile.created_by_agent != None)).one()  # noqa: E711
+    ahead = session.exec(select(func.count()).select_from(TeammateRequest).where(
+        active, TeammateRequest.id < request.id)).one()
+    if not earlier and made + ahead < settings.max_agent_teammates:
         return request.id
+    withdrawn = session.exec(update(TeammateRequest).where(
+        TeammateRequest.id == request.id, TeammateRequest.status == "pending").values(
+        status="failed", error="Another request for this teammate came first" if earlier
+        else "The workspace teammate limit was reached"))
+    session.commit()
+    if not withdrawn.rowcount:  # the app server already claimed it
+        return request.id
+    return earlier.id if earlier else _limit_reached()
+
+
+def _limit_reached() -> dict:
+    return {"error": f"Agents have already created {settings.max_agent_teammates} teammates, the workspace "
+                     "limit. Reuse an existing teammate or ask a person to create one."}
 
 
 async def create_teammate(task: AgentTask, *, name: str, role: str, instructions: str, call_id: str,
