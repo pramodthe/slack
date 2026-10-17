@@ -9,13 +9,13 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import Field
 from sqlmodel import select
-from app.agent_tools import tools_for
+from app.runtime.tools import tools_for
 from app.auth import encrypt_secret, issue_token
-from app.harness import build_harness
+from app.runtime.harness import build_harness
 from app.main import app
-from app.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
+from app.persistence.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
 from app.tasks import enqueue, recover_tasks, update_task
-from app.worker import complete, execute, process
+from app.tasks.worker import complete, execute, process
 
 
 class ScriptedModel(BaseChatModel):
@@ -179,7 +179,7 @@ def test_worker_shutdown_leaves_job_recoverable(job):
 
 def test_unknown_band_delivery_is_not_retried(job, monkeypatch):
     from types import SimpleNamespace
-    import app.worker as worker
+    import app.tasks.worker as worker
     task, _, _ = job
     update_task(task.id, status="running", reply_to="owner")
     complete(task, "Saved answer")
@@ -221,7 +221,7 @@ def test_task_controls_reject_nonmembers(job):
 
 def test_worker_timeout_preserves_failure_for_manual_resume(job, monkeypatch):
     from types import SimpleNamespace
-    import app.worker as worker
+    import app.tasks.worker as worker
     task, _, _ = job
     update_task(task.id, status="running")
     monkeypatch.setattr(worker, "settings", SimpleNamespace(task_timeout=0.01))
@@ -236,7 +236,7 @@ def test_worker_timeout_preserves_failure_for_manual_resume(job, monkeypatch):
 
 def test_missing_optional_tools_report_unavailable(job, monkeypatch):
     from types import SimpleNamespace
-    import app.agent_tools as module
+    import app.runtime.tools.web as module
     task, _, _ = job
     monkeypatch.setattr(module, "settings", SimpleNamespace(exa_api_key=""))
     tools = {tool.name: tool for tool in tools_for(task)}
@@ -261,8 +261,8 @@ def test_worker_replies_reach_websocket_without_band(job):
 
 def test_local_mention_is_durable_before_band_and_echo_is_deduplicated(job):
     from types import SimpleNamespace
-    from app.agent_runner import QueuedAgentAdapter
-    from app.service import AppService
+    from app.band.listener import QueuedAgentAdapter
+    from app.workspace.service import AppService
     task, agent, user = job
     svc = AppService()
     async def scenario():
@@ -282,7 +282,7 @@ def test_local_mention_is_durable_before_band_and_echo_is_deduplicated(job):
 
 
 def test_local_mention_carries_recent_channel_context(job):
-    from app.service import AppService
+    from app.workspace.service import AppService
     task, agent, user = job
     svc = AppService()
     async def scenario():
@@ -313,7 +313,7 @@ def run_scripted(task, saver, responses):
 
 
 def test_visible_handoff_reports_back_to_requester(tmp_path, job):
-    from app.models import TaskHandoff
+    from app.persistence.models import TaskHandoff
     task, master, _ = job
     writer = teammate()
     async def scenario():
@@ -415,7 +415,7 @@ def test_handoff_without_report_back_answers_humans(job):
 
 
 def test_progress_labels_are_readable():
-    from app.worker import describe_call
+    from app.tasks.worker import describe_call
     assert describe_call({"name": "fetch_page", "args": {}}) == "Reading a web page"
     assert describe_call({"name": "task", "args": {"subagent_type": "researcher"}}) == "Asking the researcher helper"
     assert describe_call({"name": "ask_teammate", "args": {"teammate": "Writer"}}) == "Handing off to Writer"
@@ -477,7 +477,7 @@ def test_next_task_keeps_each_agent_in_order_per_channel(job):
 
 
 def test_run_queue_overlaps_agents_and_respects_limits(job):
-    from app.worker import run_queue
+    from app.tasks.worker import run_queue
     task, master, _ = job
     writer = teammate()
     second = enqueue(agent_id=master.id, channel_id=task.channel_id, room_id=task.room_id,
@@ -585,7 +585,7 @@ def tool_results(model):
 
 
 def test_approval_pauses_task_and_resumes_after_api_decision(tmp_path, job):
-    from app.models import TaskApproval
+    from app.persistence.models import TaskApproval
     task, _, user = job
     paused = run_attempt(tmp_path, task, ScriptedModel(responses=[approval_call()]))
     assert paused.status == "waiting" and paused.progress == "Waiting for approval"
@@ -626,7 +626,7 @@ def test_approval_pauses_task_and_resumes_after_api_decision(tmp_path, job):
 
 
 def test_denied_approval_tells_the_agent_not_to_act(tmp_path, job):
-    from app.models import TaskApproval
+    from app.persistence.models import TaskApproval
     from app.tasks import decide_approval
     task, _, _ = job
     run_attempt(tmp_path, task, ScriptedModel(responses=[approval_call("deny-1")]))
@@ -646,7 +646,7 @@ def test_approval_inside_computer_helper_resumes_the_helper(tmp_path, job):
         approval_call("helper-approval"),
     ])
     assert run_attempt(tmp_path, task, first).status == "waiting"
-    from app.models import TaskApproval
+    from app.persistence.models import TaskApproval
     from app.tasks import decide_approval
     with db() as session:
         approval = session.exec(select(TaskApproval).where(TaskApproval.task_id == task.id)).one()
@@ -668,9 +668,9 @@ def test_waiting_task_can_be_cancelled(tmp_path, job):
 
 def test_deleting_an_agent_leaves_nothing_for_a_reused_id(job):
     from app.computer import TaskComputer, sandbox_record, save_sandbox
-    from app.models import AgentMemory, Schedule
-    from app.schedules import create_schedule
-    from app.service import AppService
+    from app.persistence.models import AgentMemory, Schedule
+    from app.tasks.schedules import create_schedule
+    from app.workspace.service import AppService
     task, _, _ = job
     writer = teammate()
     work = enqueue(agent_id=writer.id, channel_id=task.channel_id, room_id=task.room_id,
@@ -695,7 +695,7 @@ def test_deleting_an_agent_leaves_nothing_for_a_reused_id(job):
 
 
 def test_cancelling_a_waiting_task_closes_its_approval(tmp_path, job):
-    from app.models import TaskApproval
+    from app.persistence.models import TaskApproval
     task, _, user = job
     run_attempt(tmp_path, task, ScriptedModel(responses=[approval_call("cancelled-approval")]))
     with db() as session:

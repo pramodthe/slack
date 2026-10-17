@@ -15,7 +15,7 @@ from daytona import (AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfi
                      DaytonaNotFoundError, DaytonaRateLimitError, ScreenshotOptions)
 
 from app.config import settings
-from app.models import AgentProfile, AgentTask, ComputerControl, TaskSandbox, db, utcnow
+from app.persistence.models import AgentProfile, AgentTask, ComputerControl, TaskSandbox, db, utcnow
 
 logger = logging.getLogger(__name__)
 

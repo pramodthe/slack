@@ -29,6 +29,7 @@ Copy `.env.example` to `.env` in the repository root and configure:
 | `APP_SECRET` | Sign sessions and encrypt stored Band agent keys. Set a long random value. |
 | `DEFAULT_MODEL` | Default Anthropic model identifier. Existing agents retain their saved selection. |
 | `EXA_API_KEY` | Optional web research. Without it, search returns an explicit unavailable result. |
+| `FAST_CODE_EXECUTION` | `on` (default) gives agents Anthropic's hosted `code_execution` tool for quick calculations; `off` sends all code to the Daytona computer. |
 | `DAYTONA_API_KEY` | Enables cloud computers, browser/GUI operations, and Python/shell execution. |
 | `DAYTONA_SNAPSHOT` | Optional desktop-ready snapshot; unset uses Daytona's default environment. |
 | `DAYTONA_API_URL`, `DAYTONA_TARGET` | Optional Daytona endpoint/region overrides. |
@@ -84,7 +85,9 @@ The **Agent tasks** panel shows progress, cancellation, resume controls, results
 - Web research uses [Exa Search](https://exa.ai/docs/reference/search) with a 30-second timeout, up to five sources, and up to 6,000 text characters per source. Set `EXA_API_KEY`; retrieved text is treated as untrusted source material.
 - `fetch_page` reads one public URL as text through Exa's contents API (up to 20,000 characters) without starting a computer. Exa fetches from its own servers, so private and localhost addresses are not reachable. Agents are instructed to use the cheapest sufficient tool: knowledge, memory, and channel history; then search and page fetch; then code execution; and the Daytona desktop only for logins, forms, interactive pages, or visual checks.
 - Local `@mention` tasks include the channel's last 30 messages (up to 24,000 characters) as untrusted context, like Band turns.
-- Computer and code execution use Daytona; local Docker execution is removed. See **Daytona computer use** below.
+- Quick calculations and self-contained data work use Anthropic's hosted [code execution tool](https://docs.claude.com/en/docs/agents-and-tools/tool-use/code-execution-tool) (`code_execution`), available to the parent agent and its coder and critic helpers. It runs inside the model call, so no Daytona computer is created or started, but it cannot see the agent's computer files. Set `FAST_CODE_EXECUTION=off` to disable it; it is also skipped for non-Claude and Claude 3 models. Anthropic bills its container time separately.
+- Work that needs the agent's own files, installed packages, the network, or a desktop uses Daytona; local Docker execution is removed. See **Daytona computer use** below.
+- Replies stream into the channel while the agent writes them. Only the parent agent's final answer streams (text it writes before a tool call is dropped); helpers, report-backs to teammates, and interim statuses don't stream. The draft lives in the `MessageDraft` table and is removed when the final message is saved or the task fails, is cancelled, or pauses for approval. Band still receives only the final message.
 - Each task has its own checkpoint thread. Worker restart requeues interrupted tasks and resumes saved progress. Provider requests have bounded retries; task failures require **Resume**. The parent has a 40-model-call limit per invocation and 120 per task thread; computer helpers have a 30-call limit and other named helpers have a 12-call limit per invocation, in addition to graph/time limits. These are execution limits, not dollar budgets.
 - Local replies are committed with task completion. Band replies get one automatic send attempt: uncertain outcomes are marked `unknown` and are never blindly resent. A local answer remains available even when Band delivery is uncertain. Full local answers may exceed the 8,000-character Band copy.
 
@@ -139,14 +142,13 @@ Offline tests exercise actual Deep Agents tool calls and helper delegation using
 
 ## Project layout
 
-- `backend/app/main.py`: HTTP/WebSocket routes and built UI hosting.
-- `backend/app/service.py`, `band_org.py`: Band synchronization and visible agent management.
-- `backend/app/agent_runner.py`: lightweight Band listeners that enqueue work.
-- `backend/app/tasks.py`, `worker.py`: durable queue, hand-offs, approvals, recovery, execution, and reply delivery.
-- `backend/app/schedules.py`, `integrations.py`: scheduled requests and MCP integrations.
-- `backend/app/harness.py`, `agent_tools.py`: Deep Agents configuration, helpers, and scoped tools.
-- `backend/app/computer.py`: task-owned Daytona lifecycle, desktop observations/actions, and remote file/command tools.
-- `backend/app/models.py`, `auth.py`: persistence, session authentication, and key encryption.
+- `backend/app/main.py`: ASGI entry (`uvicorn app.main:app`). Routes live in `backend/app/api/http.py`.
+- `backend/app/workspace/`: channels, messages, and the agent profiles people create (`service.py`, `roles.py`, `events.py`).
+- `backend/app/band/`: Band registration (`org.py`) and the listener that only enqueues (`listener.py`).
+- `backend/app/tasks/`: durable queue, hand-offs, approvals (`queue.py`), schedules (`schedules.py`), and the worker (`worker.py`, started with `python -m app.worker`).
+- `backend/app/runtime/harness.py`: builds one Deep Agent per task. Helpers are `runtime/helpers/`. Tools are `runtime/tools/` (memory, channel, web, teammates, schedules, approvals, computer, and MCP).
+- `backend/app/computer/`: Daytona desktop lifecycle, observations, actions, and files.
+- `backend/app/persistence/models.py`, `backend/app/auth.py`: database models, session authentication, and key encryption.
 - `backend/tests/`: offline regression tests.
 - `frontend/src/`: React workspace and task controls.
 

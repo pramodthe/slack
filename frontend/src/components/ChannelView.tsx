@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Dispatch } from "react";
 import type { State, Action } from "../store";
-import type { Channel, ChannelComputer, Message } from "../types";
+import type { Channel, ChannelComputer, Draft, Message } from "../types";
 import Avatar from "./Avatar";
 import Composer from "./Composer";
 import TaskPanel from "./TaskPanel";
@@ -68,6 +68,27 @@ function MessageRow({
   );
 }
 
+function DraftRow({ draft, state, openModal }: { draft: Draft; state: State; openModal: (m: Modal) => void }) {
+  const agent = state.agents[draft.agent_id];
+  return (
+    <div className="msg msg-agent msg-draft">
+      <div className="msg-gutter">
+        <Avatar name={agent.name} kind="agent" role={agent.role} />
+      </div>
+      <div className="msg-body">
+        <div className="msg-header">
+          <button className="msg-author" onClick={() => openModal({ kind: "agent", agentId: agent.id })}>
+            {agent.name}
+          </button>
+          <span className="app-tag">{agent.role_label}</span>
+          <span className="msg-time">writing…</span>
+        </div>
+        <RichText text={draft.content} />
+      </div>
+    </div>
+  );
+}
+
 export default function ChannelView({
   state,
   dispatch,
@@ -95,6 +116,8 @@ export default function ChannelView({
   const messages = state.messages[channel.id];
   const visible = (messages ?? []).filter((m) => showChatter || !isChatter(m));
   const hiddenCount = (messages?.length ?? 0) - visible.length;
+  const drafts = Object.values(state.drafts[channel.id] ?? {}).filter((d) => state.agents[d.agent_id]);
+  const draftLength = drafts.reduce((total, d) => total + d.content.length, 0);
   const typingNames = (state.typing[channel.id] ?? []).map((id) => state.agents[id]?.name).filter(Boolean);
   const working = [
     ...typingNames.map((name) => `${name} is working…`),
@@ -109,7 +132,7 @@ export default function ChannelView({
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [visible.length, working.length]);
+  }, [visible.length, working.length, draftLength]);
 
   const onScroll = () => {
     const el = scroller.current;
@@ -216,7 +239,12 @@ export default function ChannelView({
             )}
           </div>
         )}
-        <MentionNames names={mentionNames}>{rows}</MentionNames>
+        <MentionNames names={mentionNames}>
+          {rows}
+          {drafts.map((d) => (
+            <DraftRow key={d.task_id} draft={d} state={state} openModal={openModal} />
+          ))}
+        </MentionNames>
         {hiddenCount > 0 && (
           <button className="link hidden-note" onClick={() => setShowChatter(true)}>
             {hiddenCount} agent-to-agent message{hiddenCount === 1 ? "" : "s"} hidden. Show them

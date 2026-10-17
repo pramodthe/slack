@@ -16,7 +16,7 @@ from band_rest.human_api_chats.types.create_my_chat_room_request_chat import Cre
 from band_rest.types import ChatMessage
 from band_rest.types.agent_register_request import AgentRegisterRequest
 
-from app.agent_runner import describe_error
+from app.band.listener import describe_error
 from app.config import settings
 
 logger = logging.getLogger(__name__)

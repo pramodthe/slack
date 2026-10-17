@@ -10,8 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.config import settings
-from app.models import AgentProfile, AgentTask, Schedule, db, utcnow
-from app.tasks import channel_context, enqueue
+from app.persistence.models import AgentProfile, AgentTask, Schedule, db, utcnow
+from app.tasks.queue import channel_context, enqueue
 
 logger = logging.getLogger(__name__)
 

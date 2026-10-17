@@ -509,6 +509,24 @@ code {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+.msg-draft .msg-time {
+  font-style: italic;
+}
+.msg-draft .rich-text > :last-child > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--muted);
+  animation: draft-caret 1s steps(1) infinite;
+}
+@keyframes draft-caret {
+  50% {
+    opacity: 0;
+  }
+}
 .msg.chatter .msg-body {
   border-left: 3px solid #d9cfe0;
   padding-left: 10px;

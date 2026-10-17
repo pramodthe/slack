@@ -3,8 +3,8 @@ import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 from sqlmodel import select
-from app.agent_runner import QueuedAgentAdapter
-from app.models import AgentTask, Channel, db, init_db
+from app.band.listener import QueuedAgentAdapter
+from app.persistence.models import AgentTask, Channel, db, init_db
 
 
 def test_bridge_persists_and_deduplicates_turns():

@@ -9,14 +9,14 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from app.agent_runner import AgentManager, describe_error, fetch_identity
+from app.band.listener import AgentManager, describe_error, fetch_identity
 from app.auth import encrypt_secret
-from app.band_org import BandOrg
+from app.band.org import BandOrg
 from app.config import settings
-from app.events import bus
-from app.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message, Schedule,
-                        TaskSandbox, User, db, dm_owner)
-from app.roles import MASTER_ROLE, ROLES, role_label
+from app.workspace.events import bus
+from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
+                                    MessageDraft, Schedule, TaskSandbox, User, db, dm_owner)
+from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context
 
 logger = logging.getLogger(__name__)
@@ -110,10 +110,14 @@ class AppService:
     async def _watch_task_messages(self, after_id: int) -> None:
         """Bridge worker commits into WebSocket updates: replies, hand-offs, approval requests, and task progress."""
         active: dict[str, dict[str, Any]] = {}
+        drafts: dict[str, dict[str, Any]] = {}
         while True:
             await asyncio.sleep(0.5)
             try:
                 with db() as session:
+                    # Read drafts first: a reply committed in between then shows up as a message, never as a gap.
+                    written = {d.task_id: {"task_id": d.task_id, "channel_id": d.channel_id, "agent_id": d.agent_id,
+                                           "content": d.content} for d in session.exec(select(MessageDraft)).all()}
                     messages = session.exec(select(Message).join(
                         AgentTask, AgentTask.reply_message_id == Message.id
                     ).where(Message.id > after_id)).all() + session.exec(select(Message).where(
@@ -121,12 +125,19 @@ class AppService:
                         | Message.band_message_id.startswith("approval:"))).all()
                     working = session.exec(select(AgentTask).where(
                         AgentTask.status.in_(["queued", "running", "waiting"]))).all()
+                # Updates go before replies and removals after, so a draft never reappears or leaves a gap.
+                for task_id, draft in written.items():
+                    if drafts.get(task_id) != draft:
+                        await bus.publish({"type": "draft", **draft})
                 for message in sorted(messages, key=lambda m: m.id):
                     await bus.publish({"type": "message", "message": serialize_message(message)})
                     after_id = message.id
                 # The worker adds hand-off teammates as channel members; refresh member lists once per channel.
                 for channel_id in {m.channel_id for m in messages if (m.band_message_id or "").startswith("handoff:")}:
                     await self.publish_channel(channel_id)
+                for task_id in drafts.keys() - written.keys():
+                    await bus.publish({"type": "draft", **drafts[task_id], "content": ""})
+                drafts = written
                 current = {t.id: {"id": t.id, "channel_id": t.channel_id, "agent_id": t.agent_id,
                                   "status": t.status, "progress": t.progress} for t in working}
                 for task_id, info in current.items():

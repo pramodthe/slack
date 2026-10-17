@@ -1,4 +1,4 @@
-import type { Agent, BandStatus, Bootstrap, Channel, Message, Model, Role, ServerEvent, TaskActivity, User } from "./types";
+import type { Agent, BandStatus, Bootstrap, Channel, Draft, Message, Model, Role, ServerEvent, TaskActivity, User } from "./types";
 
 export interface State {
   me: User;
@@ -8,6 +8,7 @@ export interface State {
   messages: Record<number, Message[]>;
   typing: Record<number, number[]>;
   activity: Record<number, Record<string, TaskActivity>>;
+  drafts: Record<number, Record<string, Draft>>;
   unread: Record<number, number>;
   roles: Role[];
   models: Model[];
@@ -34,6 +35,7 @@ export function initialState(boot: Bootstrap): State {
     messages: {},
     typing: {},
     activity: {},
+    drafts: {},
     unread: {},
     roles: boot.roles,
     models: boot.models,
@@ -49,14 +51,26 @@ function mergeMessages(existing: Message[] | undefined, incoming: Message[]): Me
   return [...map.values()].sort((a, b) => a.id - b.id);
 }
 
+function withoutDrafts(state: State, channelId: number, drop: (d: Draft) => boolean): State {
+  const current = state.drafts[channelId];
+  if (!current || !Object.values(current).some(drop)) return state;
+  const kept = Object.fromEntries(Object.entries(current).filter(([, d]) => !drop(d)));
+  return { ...state, drafts: { ...state.drafts, [channelId]: kept } };
+}
+
 function applyEvent(state: State, event: ServerEvent): State {
   switch (event.type) {
     case "message": {
       const { message } = event;
       const loaded = state.messages[message.channel_id];
       const isActive = message.channel_id === state.activeChannelId;
+      // An agent runs one task per channel at a time, so its message replaces its draft there.
+      const rest =
+        message.author_type === "agent"
+          ? withoutDrafts(state, message.channel_id, (d) => d.agent_id === message.author_id)
+          : state;
       return {
-        ...state,
+        ...rest,
         messages: loaded ? { ...state.messages, [message.channel_id]: mergeMessages(loaded, [message]) } : state.messages,
         unread: isActive
           ? state.unread
@@ -107,7 +121,16 @@ function applyEvent(state: State, event: ServerEvent): State {
       const current = { ...state.activity[task.channel_id] };
       if (task.status === "done") delete current[task.id];
       else current[task.id] = task;
-      return { ...state, activity: { ...state.activity, [task.channel_id]: current } };
+      const next = { ...state, activity: { ...state.activity, [task.channel_id]: current } };
+      return task.status === "done" ? withoutDrafts(next, task.channel_id, (d) => d.task_id === task.id) : next;
+    }
+    case "draft": {
+      const { type: _type, ...draft } = event;
+      if (!draft.content) return withoutDrafts(state, draft.channel_id, (d) => d.task_id === draft.task_id);
+      return {
+        ...state,
+        drafts: { ...state.drafts, [draft.channel_id]: { ...state.drafts[draft.channel_id], [draft.task_id]: draft } },
+      };
     }
   }
 }

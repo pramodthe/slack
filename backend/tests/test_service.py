@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import pytest
 from sqlmodel import select
 
-import app.service as service_module
-from app.agent_runner import BandIdentity
+import app.workspace.service as service_module
+from app.band.listener import BandIdentity
 from app.auth import encrypt_secret
-from app.band_org import BandOrg, Owner
-from app.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
-from app.service import AppService
+from app.band.org import BandOrg, Owner
+from app.persistence.models import AgentProfile, AgentTask, Channel, ChannelMember, DirectMessage, Message, User, db, init_db
+from app.workspace.service import AppService
 
 
 class FakeOrg(BandOrg):

@@ -11,7 +11,7 @@ from band.client.rest import DEFAULT_REQUEST_OPTIONS, AsyncRestClient, aclose_re
 
 from app.auth import decrypt_secret
 from app.config import settings
-from app.models import AgentProfile, AgentTask, Channel, Message, db
+from app.persistence.models import AgentProfile, AgentTask, Channel, Message, db
 from sqlmodel import select
 from app.tasks import display_names, enqueue
 

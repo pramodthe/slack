@@ -10,7 +10,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlmodel import Session
 
 from app.config import settings
-from app.models import User, get_session
+from app.persistence.models import User, get_session
 
 TOKEN_MAX_AGE = 60 * 60 * 24 * 30
 
