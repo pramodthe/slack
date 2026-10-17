@@ -274,13 +274,15 @@ export default function ChannelView({
             Agent chatter
           </label>
           {headerComputer && !computerOpen && (
-            <button
-              className={`chip ${headerComputer.agent_working ? "computer-chip-live" : ""}`}
+            <Button
+              variant="chip"
+              size="chip"
+              className={cn(headerComputer.agent_working && "border-[#1d9b5f] font-bold text-[#1d9b5f]")}
               title="Show the agent's computer"
               onClick={() => openComputer(headerComputer.agent_id, headerComputer.task_id)}
             >
               🖥 Computer{headerComputer.agent_working ? " · live" : ""}
-            </button>
+            </Button>
           )}
           {dmAgent ? (
             <button className="chip" onClick={() => openModal({ kind: "agent", agentId: dmAgent.id })}>
