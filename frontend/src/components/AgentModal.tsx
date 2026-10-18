@@ -1,10 +1,17 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { api } from "../api";
 import type { State } from "../store";
 import type { Agent } from "../types";
 import Avatar from "./Avatar";
-import ModalShell from "./ModalShell";
+import Field from "./Field";
+import ModalShell, { actionsClass, formClass } from "./ModalShell";
+import StatusDot from "./StatusDot";
 import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Textarea } from "./ui/textarea";
+
+const hint = "text-muted-foreground";
 
 const STATE_LABELS: Record<string, string> = {
   online: "Online",
@@ -14,6 +21,7 @@ const STATE_LABELS: Record<string, string> = {
 };
 
 export default function AgentModal({ state, agent, onClose }: { state: State; agent: Agent; onClose: () => void }) {
+  const id = useId();
   const [role, setRole] = useState(agent.role);
   const [model, setModel] = useState(agent.model);
   const [instructions, setInstructions] = useState(agent.instructions);
@@ -42,66 +50,75 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
 
   return (
     <ModalShell title={agent.name} onClose={onClose} wide>
-      <div className="agent-summary">
+      <div className="mb-[18px] flex items-center gap-3.5">
         <Avatar name={agent.name} kind="agent" role={agent.role} size={48} />
-        <div>
-          <div className="role-name">
+        <div className="flex min-w-0 flex-col gap-[3px] text-[12.5px]">
+          <div className="text-[15px] font-black">
             {agent.name} <Badge variant="tag">{agent.role_label}</Badge>
           </div>
-          <div className="muted small">
-            {agent.handle ? `@${agent.handle}` : agent.band_agent_id}
+          <div className={hint}>{agent.handle ? `@${agent.handle}` : agent.band_agent_id}</div>
+          <div className="flex items-center gap-1.5">
+            <StatusDot state={agent.status.state} /> {STATE_LABELS[agent.status.state] ?? agent.status.state}
+            {agent.status.error && <span className="text-destructive"> · {agent.status.error}</span>}
           </div>
-          <div className="small">
-            <span className={`dot dot-${agent.status.state}`} /> {STATE_LABELS[agent.status.state] ?? agent.status.state}
-            {agent.status.error && <span className="error error-inline"> · {agent.status.error}</span>}
-          </div>
-          {channels.length > 0 && (
-            <div className="muted small">In {channels.map((c) => `#${c.name}`).join(", ")}</div>
-          )}
+          {channels.length > 0 && <div className={hint}>In {channels.map((c) => `#${c.name}`).join(", ")}</div>}
           {agent.is_master ? (
-            <div className="muted small">Orchestrator: creates and directs the other agents. Joins every channel.</div>
+            <div className={hint}>Orchestrator: creates and directs the other agents. Joins every channel.</div>
           ) : (
-            creator && <div className="muted small">Created by {creator}</div>
+            creator && <div className={hint}>Created by {creator}</div>
           )}
         </div>
       </div>
 
-      <div className="form">
-        <div className="row">
+      <div className={formClass}>
+        <div className="grid grid-cols-2 gap-3">
           {!agent.is_master && (
-            <label>
-              Role
-              <select value={role} onChange={(e) => setRole(e.target.value)}>
-                {state.roles.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <Field id={`${id}-role`} label="Role">
+              <Select value={role} onValueChange={setRole}>
+                <SelectTrigger id={`${id}-role`} className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  {state.roles.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>
+                      {r.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
           )}
-          <label>
-            Model
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {state.models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <Field id={`${id}-model`} label="Model">
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger id={`${id}-model`} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                {state.models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
         </div>
-        <label>
-          Extra instructions
-          <textarea rows={5} value={instructions} onChange={(e) => setInstructions(e.target.value)} />
-        </label>
-        {error && <div className="error">{error}</div>}
-        <div className="form-actions spread">
+        <Field id={`${id}-instructions`} label="Extra instructions">
+          <Textarea
+            id={`${id}-instructions`}
+            rows={5}
+            className="min-h-28"
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+          />
+        </Field>
+        {error && <div className="text-destructive text-[13.5px]">{error}</div>}
+        <div className="flex justify-between gap-2">
           {agent.is_master ? (
             <span />
           ) : (
-            <button
-              className="danger"
+            <Button
+              variant="danger"
               disabled={busy}
               onClick={() =>
                 confirm(`Delete ${agent.name}? This also deletes the agent and its history on Band.`) &&
@@ -109,19 +126,18 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
               }
             >
               Delete agent
-            </button>
+            </Button>
           )}
-          <div className="form-actions">
-            <button className="secondary" disabled={busy} onClick={() => run(() => api("POST", `/api/agents/${agent.id}/restart`))}>
+          <div className={actionsClass}>
+            <Button variant="secondary" disabled={busy} onClick={() => run(() => api("POST", `/api/agents/${agent.id}/restart`))}>
               Restart
-            </button>
-            <button
-              className="primary"
+            </Button>
+            <Button
               disabled={busy || !dirty}
               onClick={() => run(() => api("PATCH", `/api/agents/${agent.id}`, { ...(agent.is_master ? {} : { role }), model, instructions }), true)}
             >
               Save and restart
-            </button>
+            </Button>
           </div>
         </div>
       </div>

@@ -1,11 +1,45 @@
-import { useState, type Dispatch } from "react";
+import { useState, type Dispatch, type ReactNode } from "react";
+import { PlusIcon, SettingsIcon } from "lucide-react";
 import { api } from "../api";
 import type { Action, State } from "../store";
 import type { Agent, Channel } from "../types";
+import { cn } from "@/lib/utils";
+import StatusDot from "./StatusDot";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import type { Modal } from "./Workspace";
 
-function StatusDot({ state }: { state: string }) {
-  return <span className={`dot dot-${state}`} />;
+const navItem =
+  "mx-2 flex w-[calc(100%-16px)] items-center gap-2 overflow-hidden rounded-md px-2.5 py-[5px] text-left text-[15px] whitespace-nowrap";
+const navButton = (active: boolean, unread: boolean) =>
+  cn(navItem, "hover:bg-aubergine-hover", unread && "font-black text-white", active && "bg-active hover:bg-active text-white");
+const iconButton = "text-sidebar-text size-6 hover:bg-white/15 hover:text-white";
+
+function SidebarAction({ label, onClick, className, children }: {
+  label: string;
+  onClick: () => void;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="ghost" size="icon-xs" className={cn(iconButton, className)} aria-label={label} onClick={onClick}>
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function UnreadBadge({ count, className }: { count: number; className?: string }) {
+  return (
+    <Badge variant="destructive" className={cn("ms-auto rounded-full px-[7px] py-px text-[11px] font-normal", className)}>
+      {count}
+    </Badge>
+  );
 }
 
 export default function Sidebar({
@@ -52,99 +86,101 @@ export default function Sidebar({
   const people = Object.values(state.users).sort(
     (a, b) => Number(b.online) - Number(a.online) || a.display_name.localeCompare(b.display_name),
   );
+  const sectionTitle = "flex items-center justify-between py-1 pr-3 pl-[18px] text-[13.5px] font-bold";
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-header">
-        <div className="workspace-name">Band Slack</div>
-        <div className={`hub-pill ${state.band.online ? "on" : "off"}`} title={state.band.error ?? ""}>
-          <StatusDot state={state.band.online ? "online" : "error"} />{" "}
+    <aside className="bg-aubergine text-sidebar-text narrow:w-[210px] flex w-[260px] shrink-0 flex-col">
+      <div className="border-aubergine-line border-b px-4 pt-3.5 pb-3">
+        <div className="text-lg font-black text-white">Band Slack</div>
+        <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs" title={state.band.error ?? ""}>
+          <StatusDot state={state.band.online ? "online" : "error"} />
           {state.band.online ? `Band: ${state.band.owner_name}` : "Band offline"}
         </div>
       </div>
 
-      <nav className="sidebar-scroll">
-        <div className="section">
-          <div className="section-title">
+      <nav className="flex-1 overflow-y-auto py-2">
+        <div className="mb-4">
+          <div className={sectionTitle}>
             Channels
-            <button className="icon-btn" title="New channel" onClick={() => openModal({ kind: "new-channel" })}>
-              +
-            </button>
+            <SidebarAction label="New channel" onClick={() => openModal({ kind: "new-channel" })}>
+              <PlusIcon />
+            </SidebarAction>
           </div>
           {channels.map((c) => {
             const unread = state.unread[c.id] ?? 0;
             return (
               <button
                 key={c.id}
-                className={`nav-item ${c.id === state.activeChannelId ? "active" : ""} ${unread ? "unread" : ""}`}
+                className={navButton(c.id === state.activeChannelId, unread > 0)}
                 onClick={() => dispatch({ type: "select_channel", channelId: c.id })}
               >
-                <span className="hash">#</span> {c.name}
-                {unread > 0 && <span className="badge">{unread}</span>}
+                <span className="opacity-70">#</span> {c.name}
+                {unread > 0 && <UnreadBadge count={unread} />}
               </button>
             );
           })}
         </div>
 
-        <div className="section">
-          <div className="section-title">
+        <div className="mb-4">
+          <div className={sectionTitle}>
             Agents
-            <button className="icon-btn" title="New agent" onClick={() => openModal({ kind: "new-agent" })}>
-              +
-            </button>
+            <SidebarAction label="New agent" onClick={() => openModal({ kind: "new-agent" })}>
+              <PlusIcon />
+            </SidebarAction>
           </div>
           {agents.map((a) => {
             const dm = dms[a.id];
             const unread = dm ? (state.unread[dm.id] ?? 0) : 0;
             return (
-              <div key={a.id} className="agent-row">
+              <div key={a.id} className="group relative">
                 <button
-                  className={`nav-item ${dm && dm.id === state.activeChannelId ? "active" : ""} ${unread ? "unread" : ""}`}
+                  className={cn(navButton(!!dm && dm.id === state.activeChannelId, unread > 0), "pr-[34px]")}
                   title={`Chat privately with ${a.name}`}
                   disabled={opening === a.id}
                   onClick={() => openDm(a)}
                 >
                   <StatusDot state={a.status.state} /> {a.name}
-                  <span className={`role-tag ${a.is_master ? "master" : ""}`}>{a.role_label}</span>
-                  {unread > 0 && <span className="badge">{unread}</span>}
+                  <span className={cn("ms-auto text-[11px] opacity-70", a.is_master && "text-away font-bold opacity-100")}>
+                    {a.role_label}
+                  </span>
+                  {unread > 0 && <UnreadBadge count={unread} className="ms-1.5" />}
                 </button>
-                <button
-                  className="icon-btn agent-settings"
-                  title={`${a.name} settings`}
-                  aria-label={`${a.name} settings`}
+                <SidebarAction
+                  label={`${a.name} settings`}
+                  className="absolute top-1/2 right-3 -translate-y-1/2 opacity-0 group-hover:opacity-80 focus-visible:opacity-80"
                   onClick={() => openModal({ kind: "agent", agentId: a.id })}
                 >
-                  ⚙
-                </button>
+                  <SettingsIcon />
+                </SidebarAction>
               </div>
             );
           })}
-          {dmError && <div className="error small sidebar-error">{dmError}</div>}
+          {dmError && <div className="text-destructive mx-[18px] my-1 text-[12.5px]">{dmError}</div>}
           {agents.length === 0 && (
-            <button className="nav-item add" onClick={() => openModal({ kind: "new-agent" })}>
+            <button className={cn(navItem, "hover:bg-aubergine-hover text-[#a995a9]")} onClick={() => openModal({ kind: "new-agent" })}>
               + Add your first agent
             </button>
           )}
         </div>
 
-        <div className="section">
-          <div className="section-title">People</div>
+        <div className="mb-4">
+          <div className={sectionTitle}>People</div>
           {people.map((u) => (
-            <div key={u.id} className="nav-item is-static">
+            <div key={u.id} className={navItem}>
               <StatusDot state={u.online ? "online" : "stopped"} /> {u.display_name}
-              {u.id === state.me.id && <span className="role-tag">you</span>}
+              {u.id === state.me.id && <span className="ms-auto text-[11px] opacity-70">you</span>}
             </div>
           ))}
         </div>
       </nav>
 
-      <div className="sidebar-footer">
+      <div className="border-aubergine-line flex justify-between gap-2 border-t px-4 py-3 text-[13px]">
         <span>
-          Signed in as <strong>{state.me.display_name}</strong>
+          Signed in as <strong className="text-white">{state.me.display_name}</strong>
         </span>
-        <button className="link light" onClick={onSignOut}>
+        <Button variant="link" size="inline" className="text-sidebar-text text-[13px]" onClick={onSignOut}>
           Sign out
-        </button>
+        </Button>
       </div>
     </aside>
   );

@@ -1,7 +1,10 @@
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { Channel } from "../types";
-import ModalShell from "./ModalShell";
+import Field from "./Field";
+import ModalShell, { actionsClass, formClass } from "./ModalShell";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 
 export default function CreateChannelModal({
   onClose,
@@ -10,6 +13,7 @@ export default function CreateChannelModal({
   onClose: () => void;
   onCreated: (id: number) => void;
 }) {
+  const id = useId();
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [error, setError] = useState("");
@@ -26,21 +30,31 @@ export default function CreateChannelModal({
 
   return (
     <ModalShell title="Create a channel" onClose={onClose}>
-      <form className="form" onSubmit={submit}>
-        <label>
-          Name
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. launch-plan" autoFocus required />
-        </label>
-        <label>
-          Topic <span className="muted">(optional)</span>
-          <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="What is this channel about?" />
-        </label>
-        {error && <div className="error">{error}</div>}
-        <div className="form-actions">
-          <button type="button" className="secondary" onClick={onClose}>
+      <form className={formClass} onSubmit={submit}>
+        <Field id={`${id}-name`} label="Name">
+          <Input
+            id={`${id}-name`}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. launch-plan"
+            autoFocus
+            required
+          />
+        </Field>
+        <Field id={`${id}-topic`} label="Topic" hint="(optional)">
+          <Input
+            id={`${id}-topic`}
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            placeholder="What is this channel about?"
+          />
+        </Field>
+        {error && <div className="text-destructive text-[13.5px]">{error}</div>}
+        <div className={actionsClass}>
+          <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
-          </button>
-          <button className="primary">Create</button>
+          </Button>
+          <Button>Create</Button>
         </div>
       </form>
     </ModalShell>

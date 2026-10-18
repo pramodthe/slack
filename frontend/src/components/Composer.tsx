@@ -115,7 +115,7 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
   };
 
   return (
-    <div className="tool-ui relative px-5 pb-[18px]">
+    <div className="relative px-5 pb-[18px]">
       <Popover open={menuOpen} onOpenChange={(open) => !open && setQuery(null)}>
         <PopoverAnchor asChild>
           <div className="border-input flex items-end gap-2 rounded-lg border py-2 ps-3 pe-2 focus-within:border-[#888] focus-within:ring-1 focus-within:ring-[#888]">

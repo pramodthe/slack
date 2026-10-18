@@ -1,9 +1,15 @@
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { State } from "../store";
 import type { Channel } from "../types";
 import Avatar from "./Avatar";
-import ModalShell from "./ModalShell";
+import Field from "./Field";
+import ModalShell, { actionsClass, formClass } from "./ModalShell";
+import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
+import { Input } from "./ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Textarea } from "./ui/textarea";
 
 export default function CreateAgentModal({
   state,
@@ -14,6 +20,7 @@ export default function CreateAgentModal({
   channel: Channel | null;
   onClose: () => void;
 }) {
+  const id = useId();
   const [role, setRole] = useState("researcher");
   const [name, setName] = useState("");
   const [model, setModel] = useState(state.models[1]?.id ?? state.models[0]?.id ?? "");
@@ -46,82 +53,91 @@ export default function CreateAgentModal({
 
   return (
     <ModalShell title="Add an agent" onClose={onClose} wide>
-      <form className="form" onSubmit={submit}>
+      <form className={formClass} onSubmit={submit}>
         {master && (
-          <div className="callout">
+          <div className="bg-muted border-border rounded-lg border px-3.5 py-3 text-sm">
             Tip: you can also just ask <strong>@{master.name}</strong> in a channel. It creates the specialists it needs
             and puts them to work.
           </div>
         )}
 
-        <div className="field-label">Role</div>
-        <div className="role-grid">
+        <div className="text-sm font-bold" id={`${id}-role`}>
+          Role
+        </div>
+        <div role="radiogroup" aria-labelledby={`${id}-role`} className="narrow:grid-cols-2 -mt-1.5 grid grid-cols-3 gap-2">
           {state.roles.map((r) => (
             <button
               type="button"
+              role="radio"
+              aria-checked={r.id === role}
               key={r.id}
-              className={`role-card ${r.id === role ? "active" : ""}`}
+              className="border-border aria-checked:border-active aria-checked:ring-active/25 flex items-start gap-2 rounded-lg border bg-white p-2.5 text-left aria-checked:ring-2"
               onClick={() => setRole(r.id)}
             >
               <Avatar name={r.label} kind="agent" role={r.id} size={28} />
-              <div>
-                <div className="role-name">{r.label}</div>
-                <div className="muted small">{r.description}</div>
+              <div className="min-w-0">
+                <div className="font-black">{r.label}</div>
+                <div className="text-muted-foreground text-[12.5px]">{r.description}</div>
               </div>
             </button>
           ))}
         </div>
 
-        <div className="row">
-          <label>
-            Name <span className="muted">(how everyone @mentions it)</span>
-            <input
+        <div className="grid grid-cols-2 gap-3">
+          <Field id={`${id}-name`} label="Name" hint="(how everyone @mentions it)">
+            <Input
+              id={`${id}-name`}
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={selectedRole?.label}
               minLength={3}
               maxLength={40}
             />
-          </label>
-          <label>
-            Model
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {state.models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          </Field>
+          <Field id={`${id}-model`} label="Model">
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger id={`${id}-model`} className="w-full">
+                <SelectValue placeholder="Choose a model" />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                {state.models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
         </div>
 
-        <label>
-          Extra instructions <span className="muted">(optional)</span>
-          <textarea
+        <Field id={`${id}-instructions`} label="Extra instructions" hint="(optional)">
+          <Textarea
+            id={`${id}-instructions`}
             rows={4}
+            className="min-h-24"
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
             placeholder={selectedRole?.instructions || "Describe exactly what this agent should do."}
           />
-        </label>
+        </Field>
 
         {channel && (
-          <label className="checkbox">
-            <input type="checkbox" checked={addToChannel} onChange={(e) => setAddToChannel(e.target.checked)} />
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={addToChannel} onCheckedChange={(checked) => setAddToChannel(checked === true)} />
             Add to #{channel.name}
           </label>
         )}
 
-        <p className="muted small">The agent is registered on Band under your organization and starts right away.</p>
+        <p className="text-muted-foreground text-[12.5px]">
+          The agent is registered on Band under your organization and starts right away.
+        </p>
 
-        {error && <div className="error">{error}</div>}
-        <div className="form-actions">
-          <button type="button" className="secondary" onClick={onClose}>
+        {error && <div className="text-destructive text-[13.5px]">{error}</div>}
+        <div className={actionsClass}>
+          <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
-          </button>
-          <button className="primary" disabled={busy || !state.band.online}>
-            {busy ? "Registering on Band…" : "Create agent"}
-          </button>
+          </Button>
+          <Button disabled={busy || !state.band.online}>{busy ? "Registering on Band…" : "Create agent"}</Button>
         </div>
       </form>
     </ModalShell>

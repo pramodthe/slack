@@ -39,7 +39,7 @@ export default function ApprovalRequest({ approval, agentName }: { approval: Mes
   const { state, label } = receipt(approval, shown, sending ?? true);
 
   return (
-    <div className="tool-ui flex flex-col gap-1.5 pt-1.5">
+    <div className="flex flex-col gap-1.5 pt-1.5">
       <ApprovalCard
         className="max-w-md"
         state={state}

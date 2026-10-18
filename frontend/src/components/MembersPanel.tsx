@@ -1,9 +1,63 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { XIcon } from "lucide-react";
 import { api } from "../api";
 import type { State } from "../store";
 import type { BandPeer, Channel } from "../types";
+import { cn } from "@/lib/utils";
 import Avatar from "./Avatar";
+import StatusDot from "./StatusDot";
+import { Button } from "./ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import type { Modal } from "./Workspace";
+
+const hint = "text-muted-foreground text-[12.5px]";
+const memberName = "flex min-w-0 flex-1 flex-col items-start text-left text-sm font-bold";
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5 border-b border-[#f0f0f0] px-4 pt-2 pb-3.5">
+      <div className="mb-1 text-sm font-black">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function MemberName({ name, sub }: { name: string; sub: string }) {
+  return (
+    <>
+      <span className="max-w-full truncate">{name}</span>
+      <span className={cn(hint, "font-normal")}>{sub}</span>
+    </>
+  );
+}
+
+function RemoveButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      className="text-muted-foreground hover:text-foreground hover:bg-[#eee]"
+      title="Remove from channel"
+      aria-label="Remove from channel"
+      onClick={onClick}
+    >
+      <XIcon />
+    </Button>
+  );
+}
+
+function Picker({ placeholder, onPick, children }: { placeholder: string; onPick: (value: string) => void; children: ReactNode }) {
+  return (
+    <Select value="" onValueChange={onPick}>
+      <SelectTrigger size="sm" className="mt-1.5 w-full border-dashed border-[#bbb] bg-white shadow-none">
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent position="popper">
+        {children}
+      </SelectContent>
+    </Select>
+  );
+}
 
 export default function MembersPanel({
   state,
@@ -28,124 +82,103 @@ export default function MembersPanel({
     run(api("POST", `/api/channels/${channel.id}/outside-agents`, { band_id: bandId }).then(() => setPeers(null)));
 
   return (
-    <aside className="members">
-      <div className="members-section">
-        <div className="members-title">Agents in #{channel.name}</div>
-        {agents.length === 0 && <div className="muted small">No agents yet.</div>}
+    <aside className="border-border narrow:hidden w-[280px] shrink-0 overflow-y-auto border-l py-3">
+      <Section title={`Agents in #${channel.name}`}>
+        {agents.length === 0 && <div className={hint}>No agents yet.</div>}
         {agents.map((a) => (
-          <div key={a.id} className="member">
+          <div key={a.id} className="flex items-center gap-2">
             <Avatar name={a.name} kind="agent" role={a.role} size={28} />
-            <button className="member-name" onClick={() => openModal({ kind: "agent", agentId: a.id })}>
-              {a.name}
-              <span className="muted small">{a.role_label}</span>
+            <button className={memberName} onClick={() => openModal({ kind: "agent", agentId: a.id })}>
+              <MemberName name={a.name} sub={a.role_label} />
             </button>
-            <span className={`dot dot-${a.status.state}`} title={a.status.error ?? a.status.state} />
-            {!a.is_master && (
-              <button
-                className="icon-btn subtle"
-                title="Remove from channel"
-                onClick={() => run(api("DELETE", `/api/channels/${channel.id}/agents/${a.id}`))}
-              >
-                ×
-              </button>
-            )}
+            <StatusDot state={a.status.state} title={a.status.error ?? a.status.state} />
+            {!a.is_master && <RemoveButton onClick={() => run(api("DELETE", `/api/channels/${channel.id}/agents/${a.id}`))} />}
           </div>
         ))}
         {available.length > 0 ? (
-          <select
-            className="add-select"
-            value=""
-            onChange={(e) =>
-              e.target.value && run(api("POST", `/api/channels/${channel.id}/agents`, { agent_id: Number(e.target.value) }))
-            }
+          <Picker
+            placeholder="+ Add an agent to this channel…"
+            onPick={(id) => run(api("POST", `/api/channels/${channel.id}/agents`, { agent_id: Number(id) }))}
           >
-            <option value="">+ Add an agent to this channel…</option>
             {available.map((a) => (
-              <option key={a.id} value={a.id}>
+              <SelectItem key={a.id} value={String(a.id)}>
                 {a.name} ({a.role_label})
-              </option>
+              </SelectItem>
             ))}
-          </select>
+          </Picker>
         ) : (
-          <button className="secondary small-btn" onClick={() => openModal({ kind: "new-agent" })}>
+          <Button variant="secondary" size="sm" className="self-start text-[13px]" onClick={() => openModal({ kind: "new-agent" })}>
             + Create a new agent
-          </button>
+          </Button>
         )}
-      </div>
+      </Section>
 
-      <div className="members-section">
-        <div className="members-title">Outside Band agents</div>
+      <Section title="Outside Band agents">
         {channel.outside_agents.length === 0 && (
-          <div className="muted small">Agents running elsewhere on Band (Claude Code, Codex, other apps).</div>
+          <div className={hint}>Agents running elsewhere on Band (Claude Code, Codex, other apps).</div>
         )}
         {channel.outside_agents.map((o) => (
-          <div key={o.band_id} className="member">
+          <div key={o.band_id} className="flex items-center gap-2">
             <Avatar name={o.name} kind="external" size={28} />
-            <span className="member-name is-static" title={o.description}>
-              {o.name}
-              <span className="muted small">@{o.handle}</span>
+            <span className={memberName} title={o.description}>
+              <MemberName name={o.name} sub={`@${o.handle}`} />
             </span>
-            <button
-              className="icon-btn subtle"
-              title="Remove from channel"
+            <RemoveButton
               onClick={() => run(api("DELETE", `/api/channels/${channel.id}/outside-agents/${encodeURIComponent(o.band_id)}`))}
-            >
-              ×
-            </button>
+            />
           </div>
         ))}
         {peers === null ? (
-          <button className="link small" onClick={loadPeers} disabled={!channel.band_room_id}>
+          <Button variant="link" size="inline" className="self-start text-[12.5px]" onClick={loadPeers} disabled={!channel.band_room_id}>
             + Invite a Band agent
-          </button>
+          </Button>
         ) : peers.length > 0 ? (
-          <select className="add-select" value="" onChange={(e) => e.target.value && invite(e.target.value)}>
-            <option value="">Choose a Band agent…</option>
+          <Picker placeholder="Choose a Band agent…" onPick={invite}>
             {peers.map((p) => (
-              <option key={p.band_id} value={p.band_id}>
+              <SelectItem key={p.band_id} value={p.band_id}>
                 {p.name} (@{p.handle}){p.online ? "" : " · offline"}
-              </option>
+              </SelectItem>
             ))}
-          </select>
+          </Picker>
         ) : (
-          <div className="muted small">No other Band agents are available to invite.</div>
+          <div className={hint}>No other Band agents are available to invite.</div>
         )}
-      </div>
+      </Section>
 
-      <div className="members-section">
-        <div className="members-title">People</div>
+      <Section title="People">
         {humans.map((u) => (
-          <div key={u.id} className="member">
+          <div key={u.id} className="flex items-center gap-2">
             <Avatar name={u.display_name} kind="human" size={28} />
-            <span className="member-name is-static">
-              {u.display_name}
-              <span className="muted small">@{u.username}</span>
+            <span className={memberName}>
+              <MemberName name={u.display_name} sub={`@${u.username}`} />
             </span>
-            <span className={`dot dot-${u.online ? "online" : "stopped"}`} />
+            <StatusDot state={u.online ? "online" : "stopped"} />
           </div>
         ))}
-        <button
-          className="link small"
+        <Button
+          variant="link"
+          size="inline"
+          className="self-start text-[12.5px]"
           onClick={() => run(api("POST", `/api/channels/${channel.id}/${joined ? "leave" : "join"}`))}
         >
           {joined ? "Leave channel" : "Join channel"}
-        </button>
-      </div>
+        </Button>
+      </Section>
 
-      <div className="members-section muted small">
+      <p className={cn(hint, "border-b border-[#f0f0f0] px-4 pt-2 pb-3.5 leading-relaxed")}>
         {channel.band_room_id ? (
           <>
             This channel is the Band room <code>#{channel.name}</code> (<code>{channel.band_room_id.slice(0, 8)}</code>). The
             whole conversation is also visible at{" "}
-            <a href="https://app.band.ai" target="_blank" rel="noreferrer">
+            <a className="text-mention hover:underline" href="https://app.band.ai" target="_blank" rel="noreferrer">
               app.band.ai
             </a>
           </>
         ) : (
           "Not linked to Band yet: the room is created once the server connects to Band."
         )}
-      </div>
-      {error && <div className="error small">{error}</div>}
+      </p>
+      {error && <div className="text-destructive px-4 text-[12.5px]">{error}</div>}
     </aside>
   );
 }

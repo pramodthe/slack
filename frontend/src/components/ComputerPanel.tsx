@@ -5,6 +5,7 @@ import type { Agent, ComputerState, FileEntry, LiveView } from "../types";
 import { cn, parseUtc } from "@/lib/utils";
 import Avatar from "./Avatar";
 import { ComputerUse, type ComputerStep } from "./assistant-ui/elements/computer-use";
+import StatusDot from "./StatusDot";
 import { Button } from "./ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
@@ -134,11 +135,11 @@ export default function ComputerPanel({ taskId, agent, working, others, onSwitch
   const viewOnly = !control?.mine;
   const liveSrc = live && `${live.url}?autoconnect=true&resize=scale&reconnect=true&view_only=${viewOnly}`;
   const status = computer?.status.replaceAll("_", " ") ?? "loading";
-  const dot = computer?.status === "running" ? "bg-online border-online" : computer?.error ? "bg-destructive border-destructive" : "border-[#9a8a9a]";
+  const dot = computer?.status === "running" ? "online" : computer?.error ? "error" : "stopped";
 
   return (
     <aside
-      className="tool-ui border-border flex min-h-0 w-[min(560px,44vw)] shrink-0 flex-col border-l bg-[#fafafa] text-[13px] narrow:fixed narrow:inset-y-0 narrow:right-0 narrow:z-20 narrow:w-[min(100vw,560px)] narrow:shadow-[-4px_0_16px_rgba(0,0,0,0.2)]"
+      className="border-border flex min-h-0 w-[min(560px,44vw)] shrink-0 flex-col border-l bg-[#fafafa] text-[13px] narrow:fixed narrow:inset-y-0 narrow:right-0 narrow:z-20 narrow:w-[min(100vw,560px)] narrow:shadow-[-4px_0_16px_rgba(0,0,0,0.2)]"
       aria-label={`${name}'s computer`}
     >
       <header className="border-border bg-background flex min-h-[58px] items-center gap-2.5 border-b px-4 py-3">
@@ -146,7 +147,7 @@ export default function ComputerPanel({ taskId, agent, working, others, onSwitch
         <div className="min-w-0 flex-1">
           <div className="text-[15px] font-black">{name}'s computer</div>
           <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
-            <span className={cn("size-[9px] shrink-0 rounded-full border-[1.5px]", dot)} />
+            <StatusDot state={dot} />
             <span className="capitalize">{status}</span>
             {working && <span className="animate-pulse font-bold text-[#1d9b5f]">● Working</span>}
           </div>
