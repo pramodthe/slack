@@ -103,7 +103,7 @@ export function Sources({
           <span className={cn(mono, "text-muted-foreground tabular-nums")}>
             {sources.length}
           </span>
-          <ChevronDownIcon className="size-3 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-180 group-data-panel-open/trigger:rotate-180 motion-reduce:transition-none" />
+          <ChevronDownIcon className="size-3 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-180 group-data-panel-open/trigger:rotate-180 group-data-[state=open]/trigger:rotate-180 motion-reduce:transition-none" />
         </CollapsibleTrigger>
       )}
       <CollapsibleContent className={cn(collapsePanel, "outline-none")}>

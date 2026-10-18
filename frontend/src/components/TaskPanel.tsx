@@ -1,26 +1,45 @@
-import { useEffect, useRef, useState, type Dispatch } from "react";
-import { ChevronRightIcon, XIcon } from "lucide-react";
+import { useEffect, useRef, useState, type Dispatch, type ReactNode } from "react";
+import {
+  BanIcon,
+  CalendarClockIcon,
+  CircleAlertIcon,
+  CircleCheckIcon,
+  ClockIcon,
+  EllipsisIcon,
+  HandIcon,
+  LoaderCircleIcon,
+  XIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { api } from "../api";
 import type { State, Action } from "../store";
 import type { Artifact, Memory, Message, Schedule, Task, TaskDetail } from "../types";
 import type { OpenComputer } from "./Workspace";
 import RichText from "./RichText";
 import { Button } from "@/components/ui/button";
-import { cn, parseUtc } from "@/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { parseUtc } from "@/lib/utils";
 import { ArtifactCard } from "./assistant-ui/elements/artifact-card";
 import { MemoryChips } from "./assistant-ui/elements/memory-chips";
-import { ScheduleCard } from "./assistant-ui/elements/schedule-card";
-import { TaskCard, type TaskCardState } from "./assistant-ui/elements/task-card";
 import { ToolError } from "./assistant-ui/elements/tool-error";
+import { ToolTimeline, type TimelineStep } from "./assistant-ui/elements/tool-timeline";
 
-const CARD_STATE: Record<Task["status"], TaskCardState> = {
-  queued: "waiting",
-  running: "working",
-  waiting: "waiting",
-  completed: "done",
-  failed: "failed",
-  cancelled: "cancelled",
+const ICONS: Record<Task["status"], LucideIcon> = {
+  queued: ClockIcon,
+  running: LoaderCircleIcon,
+  waiting: HandIcon,
+  completed: CircleCheckIcon,
+  failed: CircleAlertIcon,
+  cancelled: BanIcon,
 };
+
+const FINISHED_SHOWN = 10;
 
 const isActive = (t: Task) => t.status === "queued" || t.status === "running" || t.status === "waiting";
 
@@ -32,7 +51,17 @@ function since(iso: string) {
   return parseUtc(iso).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+const clip = (text: string, max = 80) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
+const byTime = (key: "created_at" | "updated_at") => (a: Task, b: Task) =>
+  parseUtc(a[key]).getTime() - parseUtc(b[key]).getTime();
+
+function verbFor(task: Task) {
+  if (task.status === "running" && task.cancel_requested) return "Cancelling…";
+  if (task.status === "failed") return "Failed";
+  if (task.status === "cancelled") return "Cancelled";
+  return clip(task.progress);
+}
 
 function download(artifact: Artifact) {
   const url = URL.createObjectURL(new Blob([artifact.content], { type: "text/plain" }));
@@ -69,6 +98,35 @@ function TaskResult({ detail }: { detail: TaskDetail }) {
   );
 }
 
+function RowMenu({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon-xs" className="text-muted-foreground size-5" aria-label={`Actions for ${label}`}>
+          <EllipsisIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-40">
+        {children}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function Box({ title, onClose, children }: { title: ReactNode; onClose: () => void; children: ReactNode }) {
+  return (
+    <div className="border-border flex flex-col gap-2 rounded-xl border p-3">
+      <div className="flex items-center gap-2">
+        <span className="flex-1">{title}</span>
+        <Button variant="ghost" size="icon-xs" aria-label="Close" onClick={onClose}>
+          <XIcon />
+        </Button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 export default function TaskPanel({ channelId, state, dispatch, openComputer }: {
   channelId: number; state: State; dispatch: Dispatch<Action>; openComputer: OpenComputer;
 }) {
@@ -79,6 +137,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
   const [busy, setBusy] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, TaskDetail>>({});
   const [memory, setMemory] = useState<{ agentId: number; rows: Memory[] } | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const version = useRef("");
 
   useEffect(() => {
@@ -89,6 +148,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
     setSchedules([]);
     setResults({});
     setMemory(null);
+    setDetailId(null);
     const poll = async () => {
       try {
         const [rows, planned] = await Promise.all([
@@ -147,6 +207,11 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
     } catch (err) { setError((err as Error).message); }
   };
 
+  const showDetail = (task: Task) => {
+    setDetailId(task.id);
+    if (task.status === "completed") void loadResult(task.id);
+  };
+
   const showMemory = async (agentId: number) => {
     try {
       const rows = await api<Memory[]>("GET", `/api/channels/${channelId}/agents/${agentId}/memories`);
@@ -164,37 +229,114 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
   const agentName = (id: number) => state.agents[id]?.name ?? "Agent";
   const active = tasks.filter((t) => t.status === "running" || t.status === "queued").length;
   const waiting = tasks.filter((t) => t.status === "waiting").length;
+  const summary = [
+    "Agent tasks",
+    `${active} active`,
+    waiting > 0 && `${waiting} awaiting approval`,
+    schedules.length > 0 && `${schedules.length} scheduled`,
+  ].filter(Boolean).join(" · ");
+
+  const finished = tasks.filter((t) => !isActive(t)).sort(byTime("updated_at")).slice(-FINISHED_SHOWN);
+  const pending = tasks.filter((t) => t.status === "queued" || t.status === "waiting").sort(byTime("created_at"));
+  const running = tasks.filter((t) => t.status === "running").sort(byTime("created_at"));
+  const detail = tasks.find((t) => t.id === detailId);
+
+  const taskStep = (task: Task): TimelineStep => {
+    const verb = verbFor(task);
+    return {
+      id: task.id,
+      icon: ICONS[task.status],
+      verb,
+      chip: `${agentName(task.agent_id)} · ${since(task.updated_at)}`,
+      action: (
+        <RowMenu label={`${agentName(task.agent_id)}: ${verb}`}>
+          {task.status === "completed" && <DropdownMenuItem onSelect={() => showDetail(task)}>View result</DropdownMenuItem>}
+          {task.status === "failed" && <DropdownMenuItem onSelect={() => showDetail(task)}>View error</DropdownMenuItem>}
+          {task.status === "failed" && (
+            <DropdownMenuItem disabled={busy === task.id} onSelect={() => void control(task.id, "retry")}>Retry</DropdownMenuItem>
+          )}
+          {task.status === "cancelled" && (
+            <DropdownMenuItem disabled={busy === task.id} onSelect={() => void control(task.id, "retry")}>Resume</DropdownMenuItem>
+          )}
+          {isActive(task) && (
+            <DropdownMenuItem
+              variant="destructive"
+              disabled={busy === task.id || task.cancel_requested}
+              onSelect={() => void control(task.id, "cancel")}
+            >
+              Cancel task
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => openComputer(task.agent_id, task.id)}>Open computer</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void showMemory(task.agent_id)}>Show memory</DropdownMenuItem>
+        </RowMenu>
+      ),
+    };
+  };
+
+  const scheduleStep = (schedule: Schedule): TimelineStep => {
+    const next = schedule.next_run_at
+      ? `next ${parseUtc(schedule.next_run_at).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}`
+      : "not scheduled";
+    return {
+      id: `schedule-${schedule.id}`,
+      icon: CalendarClockIcon,
+      verb: clip(`${schedule.when.charAt(0).toUpperCase()}${schedule.when.slice(1)}: ${schedule.prompt}`),
+      chip: `${agentName(schedule.agent_id)} · ${next}`,
+      action: (
+        <RowMenu label={`${agentName(schedule.agent_id)} schedule`}>
+          <DropdownMenuItem variant="destructive" onSelect={() => void cancelSchedule(schedule)}>Cancel schedule</DropdownMenuItem>
+        </RowMenu>
+      ),
+    };
+  };
+
+  const steps = [...schedules.map(scheduleStep), ...[...finished, ...pending, ...running].map(taskStep)];
 
   return (
-    <section className="mx-6 mb-2 flex max-h-[32vh] flex-col overflow-hidden rounded-lg border border-border bg-background text-[13px]">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1.5 px-3.5 py-2 text-start font-bold hover:bg-muted"
-      >
-        <ChevronRightIcon className={cn("size-3.5 transition-transform", expanded && "rotate-90")} />
-        Agent tasks · {active} active
-        {waiting > 0 && ` · ${waiting} awaiting approval`}
-        {schedules.length > 0 && ` · ${schedules.length} scheduled`}
-      </button>
+    <section className="mx-6 mb-2 flex max-h-[32vh] flex-col gap-2 overflow-y-auto rounded-lg border border-border bg-background px-3.5 py-1.5 text-[13px]">
+      <ToolTimeline
+        className="max-w-none"
+        steps={steps}
+        visibleSteps={steps.length}
+        streaming={running.length > 0}
+        open={expanded}
+        onOpenChange={setExpanded}
+        restingLabel={summary}
+        activeLabel={summary}
+        stats={[]}
+      />
       {expanded && (
-        <div className="flex min-h-0 flex-col gap-2 overflow-y-auto border-t border-border px-3.5 py-2.5">
-          <p className="text-muted-foreground">Tasks continue while you are away. Queued tasks wait for the background worker.</p>
+        <div className="flex flex-col gap-2 pb-1.5 empty:hidden">
           {error && <p role="alert" className="text-destructive">{error}</p>}
-          {tasks.length === 0 && schedules.length === 0 && (
-            <p className="text-muted-foreground">Mention an agent to start a task.</p>
+          {steps.length === 0 && <p className="text-muted-foreground ps-4">Mention an agent to start a task.</p>}
+          {detail?.status === "failed" && (
+            <Box title={<>Why <strong>{agentName(detail.agent_id)}</strong>'s task failed</>} onClose={() => setDetailId(null)}>
+              <ToolError
+                className="max-w-none"
+                name={agentName(detail.agent_id)}
+                target={detail.progress}
+                message={detail.error ?? "The task failed."}
+                attempt={detail.attempts}
+                retrying={busy === detail.id}
+                onRetry={() => void control(detail.id, "retry")}
+              />
+            </Box>
+          )}
+          {detail?.status === "completed" && (
+            <Box title={<>Result from <strong>{agentName(detail.agent_id)}</strong></>} onClose={() => setDetailId(null)}>
+              {results[detail.id] ? <TaskResult detail={results[detail.id]} /> : <p className="text-muted-foreground">Loading result…</p>}
+              {detail.delivery_status === "unknown" && (
+                <p className="text-muted-foreground">Answer saved here. Band delivery could not be confirmed.</p>
+              )}
+            </Box>
           )}
           {memory && (
-            <div className="border-border flex flex-col gap-2 rounded-xl border p-3">
-              <div className="flex items-center gap-2">
-                <span className="flex-1">
-                  Saved knowledge for <strong>{agentName(memory.agentId)}</strong> in this channel.
-                </span>
-                <Button variant="ghost" size="icon-xs" aria-label="Close memory" onClick={() => setMemory(null)}>
-                  <XIcon />
-                </Button>
-              </div>
+            <Box
+              title={<>Saved knowledge for <strong>{agentName(memory.agentId)}</strong> in this channel.</>}
+              onClose={() => setMemory(null)}
+            >
               {memory.rows.length === 0 ? (
                 <p className="text-muted-foreground">No saved memories yet.</p>
               ) : (
@@ -207,81 +349,8 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
                   onForget={(key) => void forget(memory.agentId, key)}
                 />
               )}
-            </div>
+            </Box>
           )}
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(17rem,1fr))] items-start gap-2">
-            {schedules.map((schedule) => (
-              <ScheduleCard
-                key={`schedule-${schedule.id}`}
-                className="max-w-none"
-                name={`${agentName(schedule.agent_id)}: ${schedule.prompt}`}
-                cadence={schedule.when}
-                nextRun={schedule.next_run_at
-                  ? parseUtc(schedule.next_run_at).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-                  : "not scheduled"}
-                enabled
-                history={[]}
-                action={
-                  <Button variant="chip" size="chip" onClick={() => void cancelSchedule(schedule)}>
-                    Cancel
-                  </Button>
-                }
-              />
-            ))}
-            {tasks.map((task) =>
-              task.status === "failed" ? (
-                <ToolError
-                  key={task.id}
-                  className="max-w-none"
-                  name={agentName(task.agent_id)}
-                  target={task.progress}
-                  message={task.error ?? "The task failed."}
-                  attempt={task.attempts}
-                  retrying={busy === task.id}
-                  onRetry={() => void control(task.id, "retry")}
-                />
-              ) : (
-                <TaskCard
-                  key={task.id}
-                  className="max-w-none"
-                  state={CARD_STATE[task.status]}
-                  label={task.cancel_requested && task.status === "running" ? "Cancelling…" : task.progress}
-                  meta={agentName(task.agent_id)}
-                  elapsed={since(task.updated_at)}
-                  onOpenChange={(open) => open && void loadResult(task.id)}
-                  actions={
-                    <div className="flex flex-wrap gap-1.5">
-                      <Button variant="chip" size="chip" onClick={() => openComputer(task.agent_id, task.id)}>
-                        Computer
-                      </Button>
-                      <Button variant="chip" size="chip" onClick={() => void showMemory(task.agent_id)}>
-                        Memory
-                      </Button>
-                      {isActive(task) && (
-                        <Button
-                          variant="chip"
-                          size="chip"
-                          disabled={busy === task.id || task.cancel_requested}
-                          onClick={() => void control(task.id, "cancel")}
-                        >
-                          Cancel
-                        </Button>
-                      )}
-                      {task.status === "cancelled" && (
-                        <Button variant="chip" size="chip" disabled={busy === task.id} onClick={() => void control(task.id, "retry")}>
-                          Resume
-                        </Button>
-                      )}
-                    </div>
-                  }
-                  result={task.delivery_status === "unknown" ? "Answer saved here. Band delivery could not be confirmed." : undefined}
-                >
-                  {task.status === "completed" &&
-                    (results[task.id] ? <TaskResult detail={results[task.id]} /> : <p className="text-muted-foreground">Loading result…</p>)}
-                </TaskCard>
-              ),
-            )}
-          </div>
         </div>
       )}
     </section>
