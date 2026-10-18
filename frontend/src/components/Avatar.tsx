@@ -1,3 +1,6 @@
+import { cn } from "@/lib/utils";
+import { Avatar as AvatarRoot, AvatarFallback } from "./ui/avatar";
+
 const PALETTE = ["#e8912d", "#2bac76", "#1d9bd1", "#cd2553", "#7c3085", "#e01e5a", "#36c5f0", "#4a154b"];
 
 const ROLE_ICONS: Record<string, string> = {
@@ -16,6 +19,15 @@ function colorFor(seed: string): string {
   return PALETTE[Math.abs(hash) % PALETTE.length];
 }
 
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
 export default function Avatar({
   name,
   kind,
@@ -27,30 +39,20 @@ export default function Avatar({
   role?: string;
   size?: number;
 }) {
-  const style = { width: size, height: size, fontSize: size * 0.42, background: colorFor(name) };
-  if (kind === "agent") {
-    return (
-      <div className="avatar avatar-agent" style={style} title={name}>
-        {ROLE_ICONS[role ?? "custom"] ?? "🤖"}
-      </div>
-    );
-  }
-  if (kind === "system") {
-    return (
-      <div className="avatar avatar-system" style={{ ...style, background: "#616061" }}>
-        !
-      </div>
-    );
-  }
-  const initials = name
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  const label =
+    kind === "agent" ? (ROLE_ICONS[role ?? "custom"] ?? "🤖") : kind === "system" ? "!" : initials(name);
   return (
-    <div className="avatar" style={style} title={name}>
-      {initials}
-    </div>
+    <AvatarRoot
+      className={cn("rounded-md", kind === "agent" && "rounded-[10px]")}
+      style={{ width: size, height: size, fontSize: size * 0.42 }}
+      title={kind === "system" ? undefined : name}
+    >
+      <AvatarFallback
+        className="rounded-[inherit] text-[length:inherit] leading-none font-black text-white"
+        style={{ background: kind === "system" ? "#616061" : colorFor(name) }}
+      >
+        {label}
+      </AvatarFallback>
+    </AvatarRoot>
   );
 }

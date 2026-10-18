@@ -1,8 +1,13 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { SendHorizontalIcon } from "lucide-react";
 import { api } from "../api";
 import type { State } from "../store";
 import type { Channel } from "../types";
 import Avatar from "./Avatar";
+import { Button } from "./ui/button";
+import { Command, CommandItem, CommandList } from "./ui/command";
+import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
+import { Textarea } from "./ui/textarea";
 
 interface Candidate {
   key: string;
@@ -48,6 +53,7 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
       .sort((a, b) => Number(b.inChannel) - Number(a.inChannel) || Number(a.kind !== "agent") - Number(b.kind !== "agent"))
       .slice(0, 8);
   }, [query, state.agents, state.users, state.me.id, channel]);
+  const menuOpen = candidates.length > 0;
 
   const updateQuery = (value: string, caret: number) => {
     if (channel.is_dm) return;
@@ -87,7 +93,7 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (candidates.length > 0) {
+    if (menuOpen) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         return setHighlight((h) => (h + 1) % candidates.length);
@@ -109,52 +115,89 @@ export default function Composer({ state, channel }: { state: State; channel: Ch
   };
 
   return (
-    <div className="composer-wrap">
-      {candidates.length > 0 && (
-        <div className="mention-menu">
-          {candidates.map((c, i) => (
-            <button
-              key={c.key}
-              className={`mention-option ${i === highlight ? "active" : ""}`}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                pick(c);
+    <div className="tool-ui relative px-5 pb-[18px]">
+      <Popover open={menuOpen} onOpenChange={(open) => !open && setQuery(null)}>
+        <PopoverAnchor asChild>
+          <div className="border-input flex items-end gap-2 rounded-lg border py-2 ps-3 pe-2 focus-within:border-[#888] focus-within:ring-1 focus-within:ring-[#888]">
+            <Textarea
+              ref={input}
+              rows={1}
+              value={text}
+              role="combobox"
+              aria-label="Message"
+              aria-expanded={menuOpen}
+              aria-autocomplete="list"
+              className="max-h-[200px] min-h-6 flex-1 resize-none rounded-none border-0 p-0 py-0.5 text-[15px] shadow-none focus-visible:ring-0 md:text-[15px]"
+              placeholder={
+                dmAgent
+                  ? `Message ${dmAgent.name}`
+                  : master
+                    ? `Message #${channel.name}. Ask @${master.name} to build a team, or @mention anyone`
+                    : `Message #${channel.name}. Type @ to mention an agent or teammate`
+              }
+              onChange={(e) => {
+                setText(e.target.value);
+                updateQuery(e.target.value, e.target.selectionStart);
               }}
-              onMouseEnter={() => setHighlight(i)}
+              onClick={(e) => updateQuery(text, e.currentTarget.selectionStart)}
+              onKeyDown={onKeyDown}
+              autoFocus
+            />
+            <Button
+              size="icon-sm"
+              className="h-[30px] w-[34px] rounded-md disabled:bg-[#ddd] disabled:opacity-100"
+              onClick={send}
+              disabled={!text.trim() || sending}
+              title="Send"
+              aria-label="Send"
             >
-              <Avatar name={c.name} kind={c.kind} role={c.role} size={22} />
-              <span className="mention-name">{c.name}</span>
-              <span className="muted">{c.detail}</span>
-              {!c.inChannel && <span className="muted small">{c.kind === "agent" ? "will join" : "not in channel"}</span>}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="composer">
-        <textarea
-          ref={input}
-          rows={1}
-          value={text}
-          placeholder={
-            dmAgent
-              ? `Message ${dmAgent.name}`
-              : master
-                ? `Message #${channel.name}. Ask @${master.name} to build a team, or @mention anyone`
-                : `Message #${channel.name}. Type @ to mention an agent or teammate`
-          }
-          onChange={(e) => {
-            setText(e.target.value);
-            updateQuery(e.target.value, e.target.selectionStart);
-          }}
-          onClick={(e) => updateQuery(text, e.currentTarget.selectionStart)}
-          onKeyDown={onKeyDown}
-          autoFocus
-        />
-        <button className="send" onClick={send} disabled={!text.trim() || sending} title="Send">
-          ➤
-        </button>
-      </div>
-      {error && <div className="error small">{error}</div>}
+              <SendHorizontalIcon />
+            </Button>
+          </div>
+        </PopoverAnchor>
+        <PopoverContent
+          side="top"
+          align="start"
+          sideOffset={6}
+          className="w-[360px] p-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.15)]"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <Command
+            label="Mention someone"
+            shouldFilter={false}
+            value={candidates[highlight]?.key ?? ""}
+            onValueChange={(key) => {
+              const index = candidates.findIndex((c) => c.key === key);
+              if (index >= 0) setHighlight(index);
+            }}
+          >
+            <CommandList>
+              {candidates.map((c) => (
+                <CommandItem
+                  key={c.key}
+                  value={c.key}
+                  onSelect={() => pick(c)}
+                  className="group data-[selected=true]:bg-active cursor-pointer gap-2 rounded px-3 py-1.5 text-[15px] data-[selected=true]:text-white"
+                >
+                  <Avatar name={c.name} kind={c.kind} role={c.role} size={22} />
+                  <span className="font-bold">{c.name}</span>
+                  <span className="text-muted-foreground truncate group-data-[selected=true]:text-[#d6e6f3]">
+                    {c.detail}
+                  </span>
+                  {!c.inChannel && (
+                    <span className="text-muted-foreground ms-auto shrink-0 text-xs group-data-[selected=true]:text-[#d6e6f3]">
+                      {c.kind === "agent" ? "will join" : "not in channel"}
+                    </span>
+                  )}
+                </CommandItem>
+              ))}
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+      {error && <div className="text-destructive mt-1 text-[12.5px]">{error}</div>}
     </div>
   );
 }

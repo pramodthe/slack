@@ -68,6 +68,55 @@
   --font-mono: "Cascadia Code", Consolas, monospace;
 }
 
+@theme {
+  --animate-caret: caret 1s steps(1) infinite;
+
+  @keyframes caret {
+    50% {
+      opacity: 0;
+    }
+  }
+}
+
+/* Document globals live in the base layer so utilities always win over them. */
+@layer base {
+  :root {
+    font-family: var(--font-sans);
+    font-size: 15px;
+    color: var(--color-foreground);
+  }
+  *,
+  ::before,
+  ::after {
+    box-sizing: border-box;
+  }
+  html,
+  body,
+  #root {
+    margin: 0;
+    height: 100%;
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+  }
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    background: #f4f4f4;
+    border: 1px solid #e0e0e0;
+    border-radius: 3px;
+    padding: 1px 4px;
+    color: #c01343;
+  }
+}
+
 @layer base {
   .tool-ui,
   .tool-ui *,
@@ -82,6 +131,10 @@
     background: transparent;
     color: inherit;
     font: inherit;
+  }
+  .tool-ui a {
+    color: inherit;
+    text-decoration: inherit;
   }
   .tool-ui table {
     border-collapse: collapse;

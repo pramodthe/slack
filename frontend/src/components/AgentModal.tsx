@@ -4,6 +4,7 @@ import type { State } from "../store";
 import type { Agent } from "../types";
 import Avatar from "./Avatar";
 import ModalShell from "./ModalShell";
+import { Badge } from "./ui/badge";
 
 const STATE_LABELS: Record<string, string> = {
   online: "Online",
@@ -45,7 +46,7 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
         <Avatar name={agent.name} kind="agent" role={agent.role} size={48} />
         <div>
           <div className="role-name">
-            {agent.name} <span className="app-tag">{agent.role_label}</span>
+            {agent.name} <Badge variant="tag">{agent.role_label}</Badge>
           </div>
           <div className="muted small">
             {agent.handle ? `@${agent.handle}` : agent.band_agent_id}

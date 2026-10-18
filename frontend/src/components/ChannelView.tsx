@@ -1,10 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Dispatch } from "react";
 import type { State, Action } from "../store";
-import type { Channel, ChannelComputer, Draft, Message } from "../types";
+import type { Agent, Channel, ChannelComputer, Draft, Message } from "../types";
+import { cn } from "@/lib/utils";
 import Avatar from "./Avatar";
 import Composer from "./Composer";
 import TaskPanel from "./TaskPanel";
-import RichText, { MentionNames } from "./RichText";
+import RichText, { MentionNames, SourcesPill, linksIn, mentionClass } from "./RichText";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
 import MessageComponents from "./MessageComponents";
 import ApprovalRequest from "./ApprovalRequest";
 import { AgentHandoff } from "./assistant-ui/elements/agent-handoff";
@@ -37,12 +40,50 @@ function MessageContent({ message, settled }: { message: Message; settled: boole
       </div>
     );
   }
+  const links = message.author_type === "agent" && message.to_humans ? linksIn(message.content) : [];
   return (
     <>
-      {isChatter(message) && targets.length > 0 && <div className="chatter-label">to {targets.join(", ")}</div>}
+      {isChatter(message) && targets.length > 0 && (
+        <div className="text-chatter mb-0.5 text-xs font-bold">to {targets.join(", ")}</div>
+      )}
       <RichText text={message.content} />
       {message.components?.length > 0 && <MessageComponents components={message.components} />}
+      {links.length > 1 && <SourcesPill links={links} />}
     </>
+  );
+}
+
+const rowClass = "group flex gap-2.5 px-5 py-1.5 hover:bg-muted";
+const caretClass =
+  "[&_[data-slot=rich-text]>:last-child>:last-child]:after:bg-muted-foreground [&_[data-slot=rich-text]>:last-child>:last-child]:after:animate-caret [&_[data-slot=rich-text]>:last-child>:last-child]:after:ms-0.5 [&_[data-slot=rich-text]>:last-child>:last-child]:after:inline-block [&_[data-slot=rich-text]>:last-child>:last-child]:after:h-[1em] [&_[data-slot=rich-text]>:last-child>:last-child]:after:w-[7px] [&_[data-slot=rich-text]>:last-child>:last-child]:after:align-text-bottom [&_[data-slot=rich-text]>:last-child>:last-child]:after:content-['']";
+
+function AuthorLine({
+  name,
+  agent,
+  tag,
+  time,
+  writing = false,
+  openModal,
+}: {
+  name: string;
+  agent: Agent | null;
+  tag: string | null;
+  time: string;
+  writing?: boolean;
+  openModal: (m: Modal) => void;
+}) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <button
+        className="font-black enabled:hover:underline disabled:cursor-default"
+        onClick={() => agent && openModal({ kind: "agent", agentId: agent.id })}
+        disabled={!agent}
+      >
+        {name}
+      </button>
+      {tag && <Badge variant="tag">{tag}</Badge>}
+      <span className={cn("text-muted-foreground text-xs", writing && "italic")}>{time}</span>
+    </div>
   );
 }
 
@@ -63,28 +104,31 @@ function MessageRow({
   const chatter = isChatter(message);
 
   return (
-    <div className={`msg ${compact ? "compact" : ""} ${chatter ? "chatter" : ""} msg-${message.author_type}`}>
-      <div className="msg-gutter">
+    <div className={cn(rowClass, compact && "py-px")}>
+      <div className="w-9 shrink-0">
         {compact ? (
-          <span className="msg-time-hover">{formatTime(message.created_at)}</span>
+          <span className="text-muted-foreground invisible block pt-[3px] text-right text-[11px] group-hover:visible">
+            {formatTime(message.created_at)}
+          </span>
         ) : (
           <Avatar name={message.author_name} kind={message.author_type} role={agent?.role} />
         )}
       </div>
-      <div className="msg-body">
+      <div
+        className={cn(
+          "min-w-0 flex-1",
+          chatter && "border-l-[3px] border-[#d9cfe0] pl-2.5 text-[14px] text-[#454245]",
+          message.author_type === "system" && "text-muted-foreground italic",
+        )}
+      >
         {!compact && (
-          <div className="msg-header">
-            <button
-              className="msg-author"
-              onClick={() => agent && openModal({ kind: "agent", agentId: agent.id })}
-              disabled={!agent}
-            >
-              {message.author_name}
-            </button>
-            {agent && <span className="app-tag">{agent.role_label}</span>}
-            {message.author_type === "external" && <span className="app-tag">via Band</span>}
-            <span className="msg-time">{formatTime(message.created_at)}</span>
-          </div>
+          <AuthorLine
+            name={message.author_name}
+            agent={agent}
+            tag={agent ? agent.role_label : message.author_type === "external" ? "via Band" : null}
+            time={formatTime(message.created_at)}
+            openModal={openModal}
+          />
         )}
         <MessageContent message={message} settled={settled} />
       </div>
@@ -95,19 +139,13 @@ function MessageRow({
 function DraftRow({ draft, state, openModal }: { draft: Draft; state: State; openModal: (m: Modal) => void }) {
   const agent = state.agents[draft.agent_id];
   return (
-    <div className="msg msg-agent msg-draft">
-      <div className="msg-gutter">
+    <div className={rowClass}>
+      <div className="w-9 shrink-0">
         <Avatar name={agent.name} kind="agent" role={agent.role} />
       </div>
-      <div className="msg-body">
-        <div className="msg-header">
-          <button className="msg-author" onClick={() => openModal({ kind: "agent", agentId: agent.id })}>
-            {agent.name}
-          </button>
-          <span className="app-tag">{agent.role_label}</span>
-          <span className="msg-time">writing…</span>
-        </div>
-        <RichText text={draft.content} />
+      <div className={cn("min-w-0 flex-1", caretClass)}>
+        <AuthorLine name={agent.name} agent={agent} tag={agent.role_label} time="writing…" writing openModal={openModal} />
+        <RichText text={draft.content} streaming />
       </div>
     </div>
   );
@@ -181,8 +219,11 @@ export default function ChannelView({
     const day = formatDay(m.created_at);
     if (!prev || formatDay(prev.created_at) !== day) {
       rows.push(
-        <div key={`day-${m.id}`} className="day-divider">
-          <span>{day}</span>
+        <div
+          key={`day-${m.id}`}
+          className="before:border-border after:border-border mt-3.5 mb-1.5 flex items-center text-[13px] font-bold before:flex-1 before:border-t after:flex-1 after:border-t"
+        >
+          <span className="border-border rounded-xl border px-3 py-0.5">{day}</span>
         </div>,
       );
       prev = null;
@@ -253,13 +294,13 @@ export default function ChannelView({
         </div>
       </header>
 
-      <div className="messages" ref={scroller} onScroll={onScroll}>
+      <div className="tool-ui flex-1 overflow-y-auto pt-3 pb-1" ref={scroller} onScroll={onScroll}>
         {!messages && <div className="muted center">Loading messages…</div>}
         {messages && messages.length === 0 && (
-          <div className="channel-intro">
+          <div className="flex flex-col gap-1.5 p-5">
             {dmAgent ? (
               <>
-                <h2>{dmAgent.name}</h2>
+                <h2 className="text-[22px] font-black">{dmAgent.name}</h2>
                 <p>
                   This is your private conversation with <strong>{dmAgent.name}</strong> ({dmAgent.role_label}). Every
                   message goes straight to {dmAgent.name}, so no @mention is needed.
@@ -267,9 +308,9 @@ export default function ChannelView({
               </>
             ) : (
               <>
-                <h2># {channel.name}</h2>
+                <h2 className="text-[22px] font-black"># {channel.name}</h2>
                 <p>
-                  This is the start of <strong>#{channel.name}</strong>. Ask <span className="mention">@Master</span>{" "}
+                  This is the start of <strong>#{channel.name}</strong>. Ask <span className={mentionClass}>@Master</span>{" "}
                   for something and it delegates to specialist helpers, or add visible teammates from the members
                   panel.
                 </p>
@@ -284,15 +325,15 @@ export default function ChannelView({
           ))}
         </MentionNames>
         {hiddenCount > 0 && (
-          <button className="link hidden-note" onClick={() => setShowChatter(true)}>
+          <Button variant="link" size="inline" className="mx-5 my-2 text-[13px]" onClick={() => setShowChatter(true)}>
             {hiddenCount} agent-to-agent message{hiddenCount === 1 ? "" : "s"} hidden. Show them
-          </button>
+          </Button>
         )}
       </div>
 
       <TaskPanel key={channel.id} channelId={channel.id} state={state} dispatch={dispatch} openComputer={openComputer} />
 
-      <div className="tool-ui flex h-8 shrink-0 items-center gap-1.5 overflow-x-auto px-5 [scrollbar-width:none]" aria-live="polite">
+      <div className="tool-ui relative flex h-8 shrink-0 items-center gap-1.5 overflow-x-auto px-5 [scrollbar-width:none]" aria-live="polite">
         {working.map((item) => (
           <AgentStatus
             key={item.key}
