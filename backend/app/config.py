@@ -44,6 +44,8 @@ class Settings:
     daytona_auto_stop: int = int(_env("DAYTONA_AUTO_STOP_MINUTES", "15"))
     daytona_auto_delete: int = int(_env("DAYTONA_AUTO_DELETE_MINUTES", "10080"))
     poll_seconds: float = float(_env("BAND_POLL_SECONDS", "5"))
+    # JSON of USD per million tokens, e.g. {"claude-sonnet-5-5": {"input": 3, "output": 15}}; empty shows no cost.
+    model_prices: str = _env("MODEL_PRICES")
 
 
 settings = Settings()

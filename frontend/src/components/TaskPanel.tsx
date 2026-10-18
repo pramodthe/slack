@@ -24,7 +24,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { parseUtc } from "@/lib/utils";
+import { formatCost, formatTokens, parseUtc } from "@/lib/utils";
+import ActivityLog from "./ActivityLog";
 import { ArtifactCard } from "./assistant-ui/elements/artifact-card";
 import { MemoryChips } from "./assistant-ui/elements/memory-chips";
 import { ToolError } from "./assistant-ui/elements/tool-error";
@@ -55,6 +56,12 @@ const clip = (text: string, max = 80) => (text.length > max ? `${text.slice(0, m
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 const byTime = (key: "created_at" | "updated_at") => (a: Task, b: Task) =>
   parseUtc(a[key]).getTime() - parseUtc(b[key]).getTime();
+
+function usageFor(task: Task) {
+  if (!task.usage) return "";
+  const tokens = `${formatTokens(task.usage.input_tokens + task.usage.output_tokens)} tokens`;
+  return task.usage.cost != null ? `${tokens} (${formatCost(task.usage.cost)})` : tokens;
+}
 
 function verbFor(task: Task) {
   if (task.status === "running" && task.cancel_requested) return "Cancelling…";
@@ -138,6 +145,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
   const [results, setResults] = useState<Record<string, TaskDetail>>({});
   const [memory, setMemory] = useState<{ agentId: number; rows: Memory[] } | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [activity, setActivity] = useState<{ taskId?: string; agentId?: number } | null>(null);
   const version = useRef("");
 
   useEffect(() => {
@@ -149,6 +157,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
     setResults({});
     setMemory(null);
     setDetailId(null);
+    setActivity(null);
     const poll = async () => {
       try {
         const [rows, planned] = await Promise.all([
@@ -247,7 +256,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
       id: task.id,
       icon: ICONS[task.status],
       verb,
-      chip: `${agentName(task.agent_id)} · ${since(task.updated_at)}`,
+      chip: [agentName(task.agent_id), since(task.updated_at), usageFor(task)].filter(Boolean).join(" · "),
       action: (
         <RowMenu label={`${agentName(task.agent_id)}: ${verb}`}>
           {task.status === "completed" && <DropdownMenuItem onSelect={() => showDetail(task)}>View result</DropdownMenuItem>}
@@ -267,6 +276,7 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
               Cancel task
             </DropdownMenuItem>
           )}
+          <DropdownMenuItem onSelect={() => setActivity({ taskId: task.id, agentId: task.agent_id })}>View activity</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => openComputer(task.agent_id, task.id)}>Open computer</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void showMemory(task.agent_id)}>Show memory</DropdownMenuItem>
@@ -311,6 +321,20 @@ export default function TaskPanel({ channelId, state, dispatch, openComputer }: 
         <div className="flex flex-col gap-2 pb-1.5 empty:hidden">
           {error && <p role="alert" className="text-destructive">{error}</p>}
           {steps.length === 0 && <p className="text-muted-foreground ps-4">Mention an agent to start a task.</p>}
+          {activity ? (
+            <Box
+              title={activity.taskId
+                ? <>Activity for <strong>{agentName(activity.agentId ?? 0)}</strong>'s task</>
+                : <>Activity in this channel</>}
+              onClose={() => setActivity(null)}
+            >
+              <ActivityLog channelId={channelId} taskId={activity.taskId} />
+            </Box>
+          ) : (
+            <Button variant="link" size="inline" className="ms-4 self-start text-[12.5px]" onClick={() => setActivity({})}>
+              Channel activity
+            </Button>
+          )}
           {detail?.status === "failed" && (
             <Box title={<>Why <strong>{agentName(detail.agent_id)}</strong>'s task failed</>} onClose={() => setDetailId(null)}>
               <ToolError

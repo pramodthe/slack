@@ -1,13 +1,19 @@
 """Reply drafts: the parent agent's answer as it is written, shown in the channel until the final message lands."""
 from __future__ import annotations
 
+import logging
 import time
 
+from langchain.agents.middleware.internal_call_transformer import INTERNAL_CALL_METADATA_KEY
 from sqlalchemy import delete
+from sqlalchemy.exc import OperationalError
 
 from app.persistence.models import AgentTask, MessageDraft, db, utcnow
 
+logger = logging.getLogger(__name__)
+
 DRAFT_INTERVAL = 0.3
+LOCKED_PAUSE = 2.0
 MAX_DRAFT = 60000
 
 
@@ -29,14 +35,20 @@ def answer_text(message) -> str:
     return after if after and after.strip() else message.text
 
 
-def save_draft(task: AgentTask, content: str) -> None:
-    with db() as session:
-        if content.strip():
-            session.merge(MessageDraft(task_id=task.id, channel_id=task.channel_id, agent_id=task.agent_id,
-                                       content=content[:MAX_DRAFT], updated_at=utcnow()))
-        else:
-            session.exec(delete(MessageDraft).where(MessageDraft.task_id == task.id))
-        session.commit()
+def save_draft(task: AgentTask, content: str) -> bool:
+    """Best effort: drafts are cosmetic, so a busy database must not fail the task."""
+    try:
+        with db() as session:
+            if content.strip():
+                session.merge(MessageDraft(task_id=task.id, channel_id=task.channel_id, agent_id=task.agent_id,
+                                           content=content[:MAX_DRAFT], updated_at=utcnow()))
+            else:
+                session.exec(delete(MessageDraft).where(MessageDraft.task_id == task.id))
+            session.commit()
+    except OperationalError as exc:
+        logger.warning("Skipped a draft update for task %s (%s)", task.id, type(exc.orig).__name__)
+        return False
+    return True
 
 
 def clear_draft(task_id: str | None = None) -> None:
@@ -56,9 +68,13 @@ class Draft:
         self.text = ""
         self.saved = ""
         self.saved_at = 0.0
+        self.paused_until = 0.0
 
     def feed(self, namespace: tuple, chunk, metadata: dict) -> None:
         if not self.enabled or namespace:
+            return
+        # Middleware (e.g. context summarization) calls the model inside the root model node; never show that.
+        if metadata.get("lc_source") == "summarization" or INTERNAL_CALL_METADATA_KEY in metadata:
             return
         kind = getattr(chunk, "type", "")
         if kind == "tool":
@@ -78,10 +94,14 @@ class Draft:
         self.flush(force=True)
 
     def flush(self, force: bool = False) -> None:
-        if not self.enabled or self.text == self.saved:
+        now = time.monotonic()
+        if not self.enabled or self.text == self.saved or now < self.paused_until:
             return
-        if not force and time.monotonic() - self.saved_at < DRAFT_INTERVAL:
+        if not force and now - self.saved_at < DRAFT_INTERVAL:
             return
-        save_draft(self.task, self.text)
+        if not save_draft(self.task, self.text):
+            # Each locked write can block the event loop for the busy timeout, so back off before retrying.
+            self.paused_until = now + LOCKED_PAUSE
+            return
         self.saved = self.text
         self.saved_at = time.monotonic()

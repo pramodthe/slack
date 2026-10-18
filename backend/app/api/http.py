@@ -4,19 +4,24 @@ import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
-from sqlalchemy import case, update
+from sqlalchemy import case, or_, update
 
 from app.auth import current_user, hash_password, issue_token, user_id_from_token, verify_password
 from app.config import FRONTEND_DIST, MODELS, settings
 from app.workspace.events import bus
-from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
-                        TaskApproval, User, db, get_session, init_db, utcnow)
+from app.tasks.usage import channel_usage, task_usage
+from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, AuditEvent, Budget, Channel, ChannelMember,
+                                    ChannelPolicy, DirectMessage, Message, TaskApproval, User, WorkspaceRole, db,
+                                    get_session, init_db, utcnow)
+from app.workspace.audit import record, serialize_event
+from app.workspace.permissions import allowed, ensure_owner, is_admin, role_of, serialize_policy, workspace_roles
 from app.workspace.roles import ROLES
 from app.tasks.schedules import cancel_schedule, channel_schedules, describe, serialize_schedule
 from app.tasks import decide_approval, serialize_task, update_task
@@ -39,6 +44,7 @@ async def lifespan(_app: FastAPI):
         if not session.exec(select(Channel)).first():
             session.add(Channel(name="general", topic="Humans and agents, all together"))
             session.commit()
+        ensure_owner(session)
     startup = asyncio.create_task(service.startup())
     yield
     startup.cancel()
@@ -85,7 +91,10 @@ async def signup(body: SignupBody, session: Session = Depends(get_session)):
     session.refresh(user)
     _join_general(session, user)
     session.commit()
+    ensure_owner(session)
     await bus.publish({"type": "user", "user": serialize_user(user)})
+    if role_of(session, user.id) != "member":
+        await bus.publish({"type": "workspace_role", "user_id": user.id, "role": role_of(session, user.id)})
     general = session.exec(select(Channel).where(Channel.name == "general")).first()
     if general:
         await service.publish_channel(general.id)
@@ -111,10 +120,111 @@ async def bootstrap(user: User = Depends(current_user), session: Session = Depen
         "channels": [service.serialize_channel(session, c) for c in visible],
         "agents": [service.serialize_agent(a) for a in session.exec(select(AgentProfile)).all()],
         "roles": [{"id": k, **v} for k, v in ROLES.items()],
+        "workspace_roles": workspace_roles(session),
         "models": MODELS,
         "band": service.org.status(),
         "anthropic_configured": bool(settings.anthropic_api_key),
     }
+
+
+# --- roles, policies, and the audit log ---
+
+
+def _audit(user: User, action: str, /, *, channel_id: int | None = None, task_id: str | None = None,
+           session: Session | None = None, **detail) -> None:
+    record(action, actor_type="human", actor_id=user.id, actor_name=user.display_name, channel_id=channel_id,
+           task_id=task_id, detail=detail, session=session)
+
+
+def _require_admin(session: Session, user: User, detail: str) -> None:
+    if not is_admin(session, user.id):
+        raise HTTPException(403, detail)
+
+
+class RoleBody(BaseModel):
+    role: Literal["admin", "member"]
+
+
+@app.put("/api/users/{user_id}/role")
+async def set_role(user_id: int, body: RoleBody, user: User = Depends(current_user),
+                   session: Session = Depends(get_session)):
+    if role_of(session, user.id) != "owner":
+        raise HTTPException(403, "Only the workspace owner can change roles")
+    target = session.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    if role_of(session, user_id) == "owner":
+        raise HTTPException(409, "The owner's role can't change")
+    row = session.get(WorkspaceRole, user_id)
+    if body.role == "member" and row:
+        session.delete(row)
+    elif body.role == "admin":
+        session.merge(WorkspaceRole(user_id=user_id, role="admin", updated_at=utcnow()))
+    _audit(user, "role_changed", session=session, user=target.display_name, role=body.role)
+    session.commit()
+    await bus.publish({"type": "workspace_role", "user_id": user_id, "role": body.role})
+    return {"user_id": user_id, "role": body.role}
+
+
+class PolicyBody(BaseModel):
+    approvers: Literal["members", "admins"] | None = None
+    computer_control: Literal["members", "admins"] | None = None
+
+
+POLICY_NOTICE = {"approvers": "approve agent actions", "computer_control": "take over agent computers"}
+
+
+@app.put("/api/channels/{channel_id}/policy")
+async def set_policy(channel_id: int, body: PolicyBody, user: User = Depends(current_user),
+                     session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
+    _reject_dm(session, channel_id, "Direct messages don't have channel policies")
+    _require_admin(session, user, "Only workspace admins can change channel policies")
+    policy = session.get(ChannelPolicy, channel_id) or ChannelPolicy(channel_id=channel_id)
+    changes = {name: value for name, value in body.model_dump().items()
+               if value is not None and value != getattr(policy, name)}
+    if changes:
+        for name, value in changes.items():
+            setattr(policy, name, value)
+        policy.updated_by, policy.updated_at = user.id, utcnow()
+        session.add(policy)
+        _audit(user, "policy_changed", channel_id=channel_id, session=session, **changes)
+        session.commit()
+        await service.publish_channel(channel_id)
+        notice = "; ".join(f"{'only admins' if value == 'admins' else 'any member'} can {POLICY_NOTICE[name]}"
+                           for name, value in changes.items())
+        await service.system_message(channel_id, f"{user.display_name} changed this channel's policy: {notice}.")
+    return serialize_policy(policy)
+
+
+AUDIT_PAGE = 200
+
+
+@app.get("/api/channels/{channel_id}/audit")
+async def channel_audit(channel_id: int, before: int | None = None, task_id: str | None = None,
+                        user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """The channel's activity, newest first; page with `before` (an event id)."""
+    _channel_or_404(session, channel_id, user)
+    query = select(AuditEvent).where(AuditEvent.channel_id == channel_id)
+    if task_id:
+        query = query.where(AuditEvent.task_id == task_id)
+    if before:
+        query = query.where(AuditEvent.id < before)
+    rows = session.exec(query.order_by(AuditEvent.id.desc()).limit(AUDIT_PAGE)).all()
+    return JSONResponse([serialize_event(event) for event in rows], headers=NO_STORE)
+
+
+@app.get("/api/audit")
+async def workspace_audit(before: int | None = None, user: User = Depends(current_user),
+                          session: Session = Depends(get_session)):
+    """Every channel's activity for admins, except other people's direct messages."""
+    _require_admin(session, user, "Only workspace admins can see the whole audit log")
+    private = select(DirectMessage.channel_id).where(DirectMessage.user_id != user.id)
+    query = select(AuditEvent).where(or_(AuditEvent.channel_id.is_(None), AuditEvent.channel_id.notin_(private)))
+    if before:
+        query = query.where(AuditEvent.id < before)
+    rows = session.exec(query.order_by(AuditEvent.id.desc()).limit(AUDIT_PAGE)).all()
+    return JSONResponse([serialize_event(event) for event in rows], headers=NO_STORE)
 
 
 # --- channels ---
@@ -180,6 +290,7 @@ async def add_channel_agent(
     _reject_dm(session, channel_id, "Direct messages are one person and one agent")
     profile = _agent_or_404(session, body.agent_id)
     await service.add_agent_to_channel(channel_id, profile)
+    _audit(user, "agent_added", channel_id=channel_id, agent=profile.name)
     return {"ok": True}
 
 
@@ -189,7 +300,9 @@ async def remove_channel_agent(
 ):
     _channel_or_404(session, channel_id, user)
     _reject_dm(session, channel_id, "Direct messages are one person and one agent")
-    await service.remove_agent_from_channel(channel_id, _agent_or_404(session, agent_id))
+    profile = _agent_or_404(session, agent_id)
+    await service.remove_agent_from_channel(channel_id, profile)
+    _audit(user, "agent_removed", channel_id=channel_id, agent=profile.name)
     return {"ok": True}
 
 
@@ -210,7 +323,10 @@ async def invite_outside_agent(
 ):
     _channel_or_404(session, channel_id, user)
     _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    if not session.get(ChannelMember, (channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to invite outside agents")
     await service.invite_outside_agent(user, channel_id, body.band_id)
+    _audit(user, "outside_agent_invited", channel_id=channel_id, band_id=body.band_id)
     return {"ok": True}
 
 
@@ -220,7 +336,10 @@ async def remove_outside_agent(
 ):
     _channel_or_404(session, channel_id, user)
     _reject_dm(session, channel_id, "Direct messages are one person and one agent")
+    if not session.get(ChannelMember, (channel_id, "human", user.id)):
+        raise HTTPException(403, "Join the channel to remove outside agents")
     await service.remove_outside_agent(channel_id, band_id)
+    _audit(user, "outside_agent_removed", channel_id=channel_id, band_id=band_id)
     return {"ok": True}
 
 
@@ -296,6 +415,7 @@ async def create_agent(body: AgentCreateBody, user: User = Depends(current_user)
         channel_id=channel_id,
         created_by=user.id,
     )
+    _audit(user, "agent_created", channel_id=channel_id, agent=profile.name, role=profile.role, model=profile.model)
     return service.serialize_agent(profile)
 
 
@@ -308,10 +428,16 @@ def _agent_or_404(session: Session, agent_id: int) -> AgentProfile:
 
 @app.patch("/api/agents/{agent_id}")
 async def update_agent(
-    agent_id: int, body: AgentUpdateBody, _user: User = Depends(current_user), session: Session = Depends(get_session)
+    agent_id: int, body: AgentUpdateBody, user: User = Depends(current_user), session: Session = Depends(get_session)
 ):
     _validate_role_and_model(body.role, body.model)
     profile = _agent_or_404(session, agent_id)
+    changed = {name: value for name, value in (("role", body.role), ("model", body.model))
+               if value is not None and value != getattr(profile, name)}
+    if body.instructions is not None and body.instructions.strip() != profile.instructions:
+        changed["instructions"] = "updated"
+    if changed:
+        _audit(user, "agent_updated", session=session, agent=profile.name, **changed)
     if body.role is not None and not profile.is_master:
         profile.role = body.role
     if body.instructions is not None:
@@ -339,8 +465,12 @@ async def open_dm(agent_id: int, user: User = Depends(current_user), session: Se
 
 
 @app.delete("/api/agents/{agent_id}")
-async def delete_agent(agent_id: int, _user: User = Depends(current_user), session: Session = Depends(get_session)):
-    await service.delete_agent(_agent_or_404(session, agent_id))
+async def delete_agent(agent_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    profile = _agent_or_404(session, agent_id)
+    _require_admin(session, user, "Only workspace admins can delete agents")
+    name = profile.name
+    await service.delete_agent(profile)
+    _audit(user, "agent_deleted", agent=name)
     return {"ok": True}
 
 
@@ -352,7 +482,45 @@ async def list_tasks(channel_id: int, user: User = Depends(current_user), sessio
     _channel_or_404(session, channel_id, user)
     rows = session.exec(select(AgentTask).where(AgentTask.channel_id == channel_id)
                         .order_by(AgentTask.created_at.desc()).limit(30)).all()
-    return [serialize_task(task) for task in rows]
+    usage = task_usage(session, [task.id for task in rows])
+    return [{**serialize_task(task), "usage": usage.get(task.id)} for task in rows]
+
+
+@app.get("/api/channels/{channel_id}/usage")
+async def get_channel_usage(channel_id: int, user: User = Depends(current_user),
+                            session: Session = Depends(get_session)):
+    _channel_or_404(session, channel_id, user)
+    return JSONResponse(channel_usage(session, channel_id), headers=NO_STORE)
+
+
+class BudgetBody(BaseModel):
+    scope: Literal["agent", "channel"]
+    scope_id: int
+    daily_tokens: int | None = Field(default=None, ge=1000, le=1_000_000_000)  # None removes the budget
+
+
+@app.put("/api/budgets")
+async def set_budget(body: BudgetBody, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    _require_admin(session, user, "Only workspace admins can set budgets")
+    if body.scope == "channel":
+        target, channel_id = f"#{_channel_or_404(session, body.scope_id, user).name}", body.scope_id
+    else:
+        target, channel_id = _agent_or_404(session, body.scope_id).name, None
+    row = session.get(Budget, (body.scope, body.scope_id))
+    if body.daily_tokens is None and row:
+        session.delete(row)
+    elif body.daily_tokens is not None:
+        session.merge(Budget(scope=body.scope, scope_id=body.scope_id, daily_tokens=body.daily_tokens,
+                             updated_by=user.id, updated_at=utcnow()))
+    _audit(user, "budget_changed", channel_id=channel_id, session=session, target=target,
+           daily_tokens=body.daily_tokens or "no limit")
+    session.commit()
+    await bus.publish({"type": "budget", "scope": body.scope, "scope_id": body.scope_id,
+                       "daily_tokens": body.daily_tokens})
+    if channel_id is not None:
+        limit = f"{body.daily_tokens:,} tokens a day" if body.daily_tokens else "no limit"
+        await service.system_message(channel_id, f"{user.display_name} set this channel's token budget to {limit}.")
+    return {"scope": body.scope, "scope_id": body.scope_id, "daily_tokens": body.daily_tokens}
 
 
 def _task_or_404(session: Session, task_id: str) -> AgentTask:
@@ -373,7 +541,8 @@ async def task_detail(task_id: str, user: User = Depends(current_user), session:
     dm = session.get(DirectMessage, task.channel_id)
     if dm and dm.user_id != user.id:
         raise HTTPException(404, "Task not found")
-    return {**serialize_task(task), "result": task.result, "artifacts": task.artifacts}
+    return {**serialize_task(task), "result": task.result, "artifacts": task.artifacts,
+            "usage": task_usage(session, [task.id]).get(task.id)}
 
 
 @app.get("/api/tasks/{task_id}/computer")
@@ -467,10 +636,14 @@ async def computer_live(task_id: str, body: LiveBody, user: User = Depends(curre
                         session: Session = Depends(get_session)):
     """A short-lived noVNC link. View-only is a client setting, so the link is limited to channel members."""
     task = _member_task(session, task_id, user)
+    if body.control and not allowed(session, user.id, task.channel_id, "computer_control"):
+        raise HTTPException(403, "Only workspace admins can take over computers in this channel")
     view = await _on_computer(task, lambda computer: computer.live_view())
     key = computer_key(task)
     if body.control:
         control = take_control(key, user_id=user.id, user_name=user.display_name)
+        _audit(user, "computer_taken_over", channel_id=task.channel_id, task_id=task.id,
+               agent=_agent_name(session, task))
         await service.system_message(task.channel_id, f"{user.display_name} took control of {_agent_name(session, task)}'s "
                                                       "computer. The agent waits until it is handed back.")
     else:
@@ -483,6 +656,8 @@ async def computer_release(task_id: str, user: User = Depends(current_user), ses
     task = _member_task(session, task_id, user)
     if active_control(computer_key(task)):
         release_control(computer_key(task), user_name=user.display_name)
+        _audit(user, "computer_handed_back", channel_id=task.channel_id, task_id=task.id,
+               agent=_agent_name(session, task))
         await service.system_message(task.channel_id, f"{user.display_name} handed {_agent_name(session, task)}'s "
                                                       "computer back.")
     return {"ok": True}
@@ -501,6 +676,7 @@ async def computer_download(task_id: str, path: str, user: User = Depends(curren
                             session: Session = Depends(get_session)):
     task = _member_task(session, task_id, user)
     content = await _on_computer(task, lambda computer: computer.download(path))
+    _audit(user, "computer_download", channel_id=task.channel_id, task_id=task.id, path=path, bytes=len(content))
     filename = re.sub(r"[^A-Za-z0-9._-]", "_", path.rstrip("/").rsplit("/", 1)[-1]) or "download"
     return Response(content, media_type="application/octet-stream",
                     headers={**NO_STORE, "Content-Disposition": f'attachment; filename="{filename}"'})
@@ -516,6 +692,7 @@ async def computer_upload(task_id: str, name: str, request: Request, user: User 
         if len(content) > TRANSFER_LIMIT:
             raise HTTPException(413, "Uploads support files up to 25 MB")
     path = await _on_computer(task, lambda computer: computer.upload(name, bytes(content)))
+    _audit(user, "computer_upload", channel_id=task.channel_id, task_id=task.id, path=path, bytes=len(content))
     # Agents read the channel, so this tells them where the file is.
     await service.system_message(task.channel_id, f"{user.display_name} uploaded {name} to "
                                                   f"{_agent_name(session, task)}'s computer at {path}.")
@@ -531,6 +708,7 @@ async def computer_stop(task_id: str, user: User = Depends(current_user), sessio
     release_control(computer_key(task), user_name=user.display_name)
     computer = computer_factory(task)
     await computer.close()
+    _audit(user, "computer_stopped", channel_id=task.channel_id, task_id=task.id, agent=_agent_name(session, task))
     return {"ok": True}
 
 
@@ -551,6 +729,7 @@ async def cancel_task(task_id: str, user: User = Depends(current_user), session:
                                                         TaskApproval.status == "pending")).all()
     session.exec(update(TaskApproval).where(TaskApproval.task_id == task_id, TaskApproval.status == "pending")
                  .values(status="denied", note="Task cancelled", decided_by=user.display_name, decided_at=utcnow()))
+    _audit(user, "task_cancelled", channel_id=task.channel_id, task_id=task_id, session=session)
     session.commit()
     session.expire_all()
     if closed:
@@ -567,6 +746,7 @@ async def retry_task(task_id: str, user: User = Depends(current_user), session: 
     session.exec(update(AgentTask).where(AgentTask.id == task_id, AgentTask.status.in_(["failed", "cancelled"]))
                  .values(status="queued", cancel_requested=False, error=None,
                          progress="Queued to resume saved progress", updated_at=utcnow()))
+    _audit(user, "task_retried", channel_id=task.channel_id, task_id=task_id, session=session)
     session.commit()
     session.expire_all()
     return serialize_task(session.get(AgentTask, task_id))
@@ -593,10 +773,14 @@ async def decide(approval_id: str, body: DecisionBody, user: User = Depends(curr
         raise HTTPException(404, "Approval request not found")
     if not session.get(ChannelMember, (approval.channel_id, "human", user.id)):
         raise HTTPException(403, "Join the channel to decide its approvals")
+    if not allowed(session, user.id, approval.channel_id, "approvers"):
+        raise HTTPException(403, "Only workspace admins can decide approvals in this channel")
     decided = decide_approval(approval_id, approve=body.approve, decided_by=user.display_name, note=body.note)
     if decided is None:
         raise HTTPException(409, "This request was already decided or its task is no longer waiting")
     verdict = "approved" if body.approve else "denied"
+    _audit(user, f"approval_{verdict}", channel_id=decided.channel_id, task_id=decided.task_id,
+           action=decided.action, note=body.note)
     await service.publish_approvals([approval_id])
     await service.system_message(decided.channel_id, f"{user.display_name} {verdict}: {decided.action}"
                                  + (f" ({body.note})" if body.note else ""))
@@ -617,6 +801,7 @@ async def delete_schedule(channel_id: int, schedule_id: int, user: User = Depend
     cancelled = cancel_schedule(channel_id, schedule_id)
     if cancelled is None:
         raise HTTPException(404, "Schedule not found")
+    _audit(user, "schedule_cancelled", channel_id=channel_id, schedule=describe(cancelled), prompt=cancelled.prompt)
     await service.system_message(channel_id, f"{user.display_name} cancelled a schedule ({describe(cancelled)}): "
                                              f"{cancelled.prompt[:200]}")
     return {"ok": True}
@@ -639,6 +824,7 @@ async def forget_memory(channel_id: int, agent_id: int, key: str, user: User = D
     if memory is None:
         raise HTTPException(404, "Memory not found")
     session.delete(memory)
+    _audit(user, "memory_forgotten", channel_id=channel_id, session=session, agent_id=agent_id, key=key)
     session.commit()
     return {"ok": True}
 

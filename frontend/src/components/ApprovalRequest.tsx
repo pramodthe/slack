@@ -16,7 +16,9 @@ function receipt(approval: MessageApproval, shown: Shown, approving: boolean) {
   return { state: "request" as const, label: undefined };
 }
 
-export default function ApprovalRequest({ approval, agentName }: { approval: MessageApproval; agentName: string }) {
+export default function ApprovalRequest({ approval, agentName, blocked }: {
+  approval: MessageApproval; agentName: string; blocked: string | null;
+}) {
   const [sending, setSending] = useState<boolean | null>(null);
   const [decided, setDecided] = useState<"approved" | "denied" | null>(null);
   const [error, setError] = useState("");
@@ -46,12 +48,13 @@ export default function ApprovalRequest({ approval, agentName }: { approval: Mes
         statusLabel={label}
         icon={<ShieldAlertIcon className="size-4" />}
         title={approval.action}
-        subtitle={`${agentName} needs your approval`}
+        subtitle={blocked ? `${agentName} needs an admin's approval` : `${agentName} needs your approval`}
         description={approval.details || undefined}
         allowOnceLabel="Approve"
-        onAllowOnce={() => void decide(true)}
-        onDeny={() => void decide(false)}
+        onAllowOnce={blocked ? undefined : () => void decide(true)}
+        onDeny={blocked ? undefined : () => void decide(false)}
       />
+      {blocked && shown === "pending" && <p className="text-muted-foreground text-xs">{blocked}</p>}
       {error && (
         <p role="alert" className="text-destructive text-xs">
           {error}

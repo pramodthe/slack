@@ -236,6 +236,60 @@ class Schedule(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class WorkspaceRole(SQLModel, table=True):
+    """A person's workspace role; people without a row are members. The oldest account becomes the owner."""
+    user_id: int = Field(foreign_key="user.id", primary_key=True)
+    role: str  # owner | admin
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ChannelPolicy(SQLModel, table=True):
+    """Who may act for a channel's agents; channels without a row let any member act."""
+    channel_id: int = Field(foreign_key="channel.id", primary_key=True)
+    approvers: str = "members"  # members | admins
+    computer_control: str = "members"  # members | admins: who may take over an agent's computer
+    updated_by: int | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AuditEvent(SQLModel, table=True):
+    """One thing a person or agent did, in order. Details are short summaries and never hold secrets."""
+    __table_args__ = (UniqueConstraint("task_id", "ref"),)
+    id: int | None = Field(default=None, primary_key=True)
+    at: datetime = Field(default_factory=utcnow, index=True)
+    channel_id: int | None = Field(default=None, index=True)  # None for workspace-wide events
+    task_id: str | None = Field(default=None, index=True)
+    actor_type: str  # human | agent | system
+    actor_id: int | None = None
+    actor_name: str
+    action: str
+    detail: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    ref: str | None = None  # e.g. the tool call id, so a replayed call is recorded once per task
+
+
+class TaskUsage(SQLModel, table=True):
+    """Tokens one model call used; keyed by message id so replayed or re-streamed messages count once."""
+    __table_args__ = (UniqueConstraint("task_id", "message_id"),)
+    id: int | None = Field(default=None, primary_key=True)
+    task_id: str = Field(index=True)
+    channel_id: int = Field(index=True)
+    agent_id: int = Field(index=True)
+    message_id: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class Budget(SQLModel, table=True):
+    """A daily token limit (UTC day) for one agent or one channel."""
+    scope: str = Field(primary_key=True)  # agent | channel
+    scope_id: int = Field(primary_key=True)
+    daily_tokens: int
+    updated_by: int | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
 

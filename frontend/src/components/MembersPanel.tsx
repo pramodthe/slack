@@ -1,11 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { XIcon } from "lucide-react";
 import { api } from "../api";
-import type { State } from "../store";
+import { roleOf, type State } from "../store";
 import type { BandPeer, Channel } from "../types";
 import { cn } from "@/lib/utils";
 import Avatar from "./Avatar";
+import ChannelControls from "./ChannelControls";
 import StatusDot from "./StatusDot";
+import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import type { Modal } from "./Workspace";
@@ -74,6 +76,7 @@ export default function MembersPanel({
   const agents = channel.agent_ids.map((id) => state.agents[id]).filter(Boolean);
   const available = Object.values(state.agents).filter((a) => !channel.agent_ids.includes(a.id));
   const joined = channel.human_ids.includes(state.me.id);
+  const owner = roleOf(state, state.me.id) === "owner";
 
   const run = (p: Promise<unknown>) => p.then(() => setError("")).catch((e) => setError((e as Error).message));
   const loadPeers = () =>
@@ -146,15 +149,32 @@ export default function MembersPanel({
       </Section>
 
       <Section title="People">
-        {humans.map((u) => (
-          <div key={u.id} className="flex items-center gap-2">
-            <Avatar name={u.display_name} kind="human" size={28} />
-            <span className={memberName}>
-              <MemberName name={u.display_name} sub={`@${u.username}`} />
-            </span>
-            <StatusDot state={u.online ? "online" : "stopped"} />
-          </div>
-        ))}
+        {humans.map((u) => {
+          const role = roleOf(state, u.id);
+          return (
+            <div key={u.id} className="flex items-center gap-2">
+              <Avatar name={u.display_name} kind="human" size={28} />
+              <span className={memberName}>
+                <span className="flex max-w-full items-center gap-1.5">
+                  <span className="truncate">{u.display_name}</span>
+                  {role !== "member" && <Badge variant="tag">{role === "owner" ? "Owner" : "Admin"}</Badge>}
+                </span>
+                <span className={cn(hint, "font-normal")}>@{u.username}</span>
+              </span>
+              {owner && role !== "owner" && (
+                <Button
+                  variant="link"
+                  size="inline"
+                  className="text-[12px]"
+                  onClick={() => run(api("PUT", `/api/users/${u.id}/role`, { role: role === "admin" ? "member" : "admin" }))}
+                >
+                  {role === "admin" ? "Remove admin" : "Make admin"}
+                </Button>
+              )}
+              <StatusDot state={u.online ? "online" : "stopped"} />
+            </div>
+          );
+        })}
         <Button
           variant="link"
           size="inline"
@@ -163,6 +183,10 @@ export default function MembersPanel({
         >
           {joined ? "Leave channel" : "Join channel"}
         </Button>
+      </Section>
+
+      <Section title="Permissions and spending">
+        <ChannelControls state={state} channel={channel} />
       </Section>
 
       <p className={cn(hint, "border-b border-[#f0f0f0] px-4 pt-2 pb-3.5 leading-relaxed")}>

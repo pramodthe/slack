@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Dispatch } from "react";
-import type { State, Action } from "../store";
+import { policyBlock, type State, type Action } from "../store";
 import type { Agent, Channel, ChannelComputer, Draft, Message } from "../types";
 import { cn } from "@/lib/utils";
 import Avatar from "./Avatar";
@@ -32,9 +32,12 @@ function formatDay(iso: string) {
 
 const isChatter = (m: Message) => m.author_type === "agent" && !m.to_humans;
 
-function MessageContent({ message, settled }: { message: Message; settled: boolean }) {
+function MessageContent({ message, settled, state }: { message: Message; settled: boolean; state: State }) {
   const targets = message.mentions.filter((m) => m.type !== "human").map((m) => m.name);
-  if (message.approval) return <ApprovalRequest approval={message.approval} agentName={message.author_name} />;
+  if (message.approval) {
+    const blocked = policyBlock(state, state.channels[message.channel_id], "approvers");
+    return <ApprovalRequest approval={message.approval} agentName={message.author_name} blocked={blocked} />;
+  }
   if (message.handoff && targets.length > 0) {
     const reason = message.content.replace(/^@\S+\s*/, "");
     return (
@@ -133,7 +136,7 @@ function MessageRow({
             openModal={openModal}
           />
         )}
-        <MessageContent message={message} settled={settled} />
+        <MessageContent message={message} settled={settled} state={state} />
       </div>
     </div>
   );

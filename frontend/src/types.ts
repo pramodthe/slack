@@ -19,6 +19,14 @@ export interface Channel {
   outside_agents: OutsideAgent[];
   is_dm: boolean;
   dm_agent_id: number | null;
+  policy: ChannelPolicy;
+}
+
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+export interface ChannelPolicy {
+  approvers: "members" | "admins";
+  computer_control: "members" | "admins";
 }
 
 export interface OutsideAgent {
@@ -129,6 +137,42 @@ export interface Task {
   delivery_status: string;
   created_at: string;
   updated_at: string;
+  usage?: TaskUsage | null;
+}
+
+export interface TaskUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cost: number | null;
+}
+
+export interface AgentUsage {
+  agent_id: number;
+  tokens: number;
+  cost: number | null;
+  agent_tokens_today: number;
+  agent_budget: number | null;
+}
+
+export interface ChannelUsage {
+  since: string;
+  tokens: number;
+  cost: number | null;
+  budget: number | null;
+  agents: AgentUsage[];
+  prices_configured: boolean;
+}
+
+export interface AuditEvent {
+  id: number;
+  at: string;
+  channel_id: number | null;
+  task_id: string | null;
+  actor_type: "human" | "agent" | "system";
+  actor_id: number | null;
+  actor_name: string;
+  action: string;
+  detail: Record<string, unknown>;
 }
 
 export interface Artifact {
@@ -215,6 +259,7 @@ export interface Bootstrap {
   channels: Channel[];
   agents: Agent[];
   roles: Role[];
+  workspace_roles: Record<string, WorkspaceRole>;
   models: Model[];
   band: BandStatus;
   anthropic_configured: boolean;
@@ -231,6 +276,7 @@ export type ServerEvent =
   | { type: "message"; message: Message }
   | { type: "message_updated"; message: Message }
   | ({ type: "draft" } & Draft)
+  | { type: "draft_append"; task_id: string; channel_id: number; agent_id: number; offset: number; text: string }
   | { type: "channel"; channel: Channel }
   | { type: "user"; user: User }
   | { type: "presence"; user_id: number; online: boolean }
@@ -239,4 +285,6 @@ export type ServerEvent =
   | { type: "agent_status"; agent_id: number; status: AgentStatus }
   | { type: "typing"; channel_id: number; agent_id: number; active: boolean }
   | { type: "band_status"; band: BandStatus }
-  | { type: "task_activity"; task: TaskActivity };
+  | { type: "task_activity"; task: TaskActivity }
+  | { type: "workspace_role"; user_id: number; role: WorkspaceRole }
+  | { type: "budget"; scope: "agent" | "channel"; scope_id: number; daily_tokens: number | null };

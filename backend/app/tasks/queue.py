@@ -8,10 +8,12 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
-from app.persistence.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, TaskApproval, TaskHandoff, db,
-                        utcnow)
+from app.persistence.models import (AgentProfile, AgentTask, ChannelMember, DirectMessage, Message, OutsideHandoff,
+                                    TaskApproval, TaskHandoff, db, utcnow)
+from app.tasks.usage import over_budget
+from app.workspace.audit import record, record_agent
 
-# Teammate hand-offs allowed per original request; each also yields at most one report back.
+# Teammate hand-offs (local or outside) allowed per original request; each also yields at most one report back.
 MAX_HANDOFFS = 6
 
 
@@ -61,7 +63,24 @@ def recover_tasks() -> None:
             task.progress = "Recovered after worker restart; resuming checkpoint"
             task.updated_at = utcnow()
             session.add(task)
+        # An outside request interrupted mid-send may or may not have reached Band; it is never resent.
+        session.exec(update(OutsideHandoff).where(OutsideHandoff.status == "sending").values(status="unknown"))
         session.commit()
+
+
+def handoff_root(session, task_id: str) -> str:
+    """The original request a task works on behalf of."""
+    link = session.get(TaskHandoff, task_id)
+    return link.root_task_id if link else task_id
+
+
+def handoffs_used(session, root: str) -> int:
+    """Local and outside hand-offs made for one original request, so neither kind can loop forever."""
+    chain = [root, *session.exec(select(TaskHandoff.task_id).where(TaskHandoff.root_task_id == root)).all()]
+    local = session.exec(select(TaskHandoff.task_id).where(
+        TaskHandoff.root_task_id == root, TaskHandoff.kind == "handoff")).all()
+    outside = session.exec(select(OutsideHandoff.source_key).where(OutsideHandoff.task_id.in_(chain))).all()
+    return len(local) + len(outside)
 
 
 def next_task() -> AgentTask | None:
@@ -73,9 +92,24 @@ def next_task() -> AgentTask | None:
     with db() as session:
         busy = {(t.agent_id, t.channel_id) for t in session.exec(
             select(AgentTask).where(AgentTask.status == "running")).all()}
-        task = next((t for t in session.exec(select(AgentTask).where(AgentTask.status == "queued")
-                     .order_by(AgentTask.created_at)).all() if (t.agent_id, t.channel_id) not in busy), None)
+        limits: dict[tuple[int, int], str | None] = {}
+        task = None
+        for queued in session.exec(select(AgentTask).where(AgentTask.status == "queued")
+                                   .order_by(AgentTask.created_at)).all():
+            pair = (queued.agent_id, queued.channel_id)
+            if pair in busy:
+                continue
+            if pair not in limits:
+                limits[pair] = over_budget(session, *pair)
+            if limits[pair] is None:
+                task = queued
+                break
+            paused = f"Paused: {limits[pair]}. It starts after midnight UTC or when an admin raises the budget."
+            if queued.progress != paused:
+                queued.progress, queued.updated_at = paused, utcnow()
+                session.add(queued)
         if task is None:
+            session.commit()
             return None
         task.status = "running"
         task.progress = "Starting agent"
@@ -85,6 +119,22 @@ def next_task() -> AgentTask | None:
         session.commit()
         session.refresh(task)
         return task
+
+
+def stop_for_budget(task: AgentTask, reason: str) -> None:
+    """End a running task like a cancellation, and tell the channel why and how to resume it."""
+    with db() as session:
+        stopped = session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running")
+                               .values(status="cancelled", progress=f"Stopped: {reason}"[:1000], updated_at=utcnow()))
+        if stopped.rowcount:
+            agent = session.get(AgentProfile, task.agent_id)
+            session.add(Message(channel_id=task.channel_id, author_type="system", author_name="System",
+                                content=f"{agent.name if agent else 'An agent'} stopped working: {reason}. "
+                                        "When the budget allows, retry the task to resume from its saved progress.",
+                                band_message_id=f"budget:{task.id}:{uuid4().hex[:8]}"))
+            record("task_stopped", actor_type="system", actor_name="Budget", channel_id=task.channel_id,
+                   task_id=task.id, detail={"reason": reason}, session=session)
+        session.commit()
 
 
 def display_names(session, text: str) -> str:
@@ -127,11 +177,8 @@ def hand_off(task: AgentTask, *, teammate: str, request: str, report_back: bool,
         existing = session.exec(select(AgentTask).where(AgentTask.source_key == source_key)).first()
         if existing:
             return {"status": "handed_off", "teammate": target.name, "task_id": existing.id}
-        link = session.get(TaskHandoff, task.id)
-        root = link.root_task_id if link else task.id
-        used = session.exec(select(TaskHandoff.task_id).where(
-            TaskHandoff.root_task_id == root, TaskHandoff.kind == "handoff")).all()
-        if len(used) >= MAX_HANDOFFS:
+        root = handoff_root(session, task.id)
+        if handoffs_used(session, root) >= MAX_HANDOFFS:
             return {"error": f"This request already used {MAX_HANDOFFS} teammate hand-offs. "
                              "Finish the work yourself and answer the humans."}
         child = AgentTask(id=uuid4().hex, source_key=source_key, channel_id=task.channel_id,
@@ -150,6 +197,8 @@ def hand_off(task: AgentTask, *, teammate: str, request: str, report_back: bool,
         ])
         if not session.get(ChannelMember, (task.channel_id, "agent", target.id)):
             session.add(ChannelMember(channel_id=task.channel_id, member_type="agent", member_id=target.id))
+        record_agent(task, "handoff", session=session, ref=f"handoff:{call_id}", teammate=target.name,
+                     request=request, report_back=report_back)
         try:
             session.commit()
         except IntegrityError:
@@ -222,6 +271,8 @@ def await_approval(task: AgentTask, requests: list[tuple[str, dict]]) -> None:
                                 content=f"**Approval needed:** {action}" + (f"\n\n{details}" if details else "")
                                         + "\n\nApprove or deny it on this message.",
                                 band_message_id=f"approval:{approval_id}"))
+            record_agent(task, "approval_requested", session=session, ref=f"approval:{approval_id}",
+                         action=action, details=details)
         # A cancellation requested while the task ran wins over waiting.
         session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running",
                                              AgentTask.cancel_requested == True)  # noqa: E712

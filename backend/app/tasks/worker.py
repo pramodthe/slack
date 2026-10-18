@@ -24,10 +24,14 @@ from app.persistence.models import (AgentProfile, AgentTask, Message, MessageCom
 from app.tasks.drafts import Draft, answer_text, clear_draft
 from app.tasks.schedules import fire_due
 from app.tasks.queue import (approval_decisions, await_approval, is_interim, next_task, queue_report, recover_tasks,
-                             report_target, update_task)
+                             report_target, stop_for_budget, update_task)
+from app.tasks.usage import over_budget, record_usage
+from app.workspace.audit import record_agent, summarize_args
 
 logger = logging.getLogger(__name__)
 
+# Budgets are checked every few cancellation polls (0.5s each), since they need a usage sum.
+BUDGET_POLLS = 4
 
 TOOL_LABELS = {
     "web_search": "Searching the web", "fetch_page": "Reading a web page", "run_python": "Running code",
@@ -60,6 +64,22 @@ def server_action(message) -> str:
     if any(isinstance(b, dict) and b.get("type") == "server_tool_use" for b in blocks):
         return "Running code in a quick sandbox"
     return ""
+
+
+def record_activity(task: AgentTask, namespace: tuple, message, default_model: str) -> None:
+    """Audit a model response's tool calls (helpers' and provider-side ones too) and store its token usage."""
+    if getattr(message, "type", "") != "ai":
+        return
+    via = {"via": "helper"} if namespace else {}
+    for call in getattr(message, "tool_calls", []):
+        record_agent(task, "tool_call", ref=call.get("id") or None, tool=call["name"],
+                     args=summarize_args(call.get("args")), **via)
+    content = getattr(message, "content", "")
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "server_tool_use":
+            record_agent(task, "tool_call", ref=block.get("id") or None, tool=block.get("name") or "server_tool",
+                         args=summarize_args(block.get("input")), **via)
+    record_usage(task, message, default_model)
 
 
 def describe_call(call: dict) -> str:
@@ -117,6 +137,7 @@ async def _execute_on_computer(task: AgentTask, checkpointer, *, factory, comput
                     current = next((i for i, t in enumerate(todos) if t["status"] == "in_progress"), None)
                     step = "" if current is None else f"Step {current + 1}/{len(todos)}: {todos[current]['content']}"
                 for message in value.get("messages", []):
+                    record_activity(task, namespace, message, profile.model)
                     action = server_action(message) or action
                     for call in getattr(message, "tool_calls", []):
                         action = describe_call(call)
@@ -226,14 +247,20 @@ async def process(task: AgentTask, saver, *, executor=execute) -> None:
     runner = asyncio.create_task(executor(task, saver))
     try:
         async with asyncio.timeout(settings.task_timeout):
+            polls = 0
             while not runner.done():
                 with db() as session:
                     current = session.get(AgentTask, task.id)
-                if current.cancel_requested:
+                    spent = over_budget(session, task.agent_id, task.channel_id) if polls % BUDGET_POLLS == 0 else None
+                polls += 1
+                if current.cancel_requested or spent:
                     runner.cancel()
                     await asyncio.gather(runner, return_exceptions=True)
                     clear_draft(task.id)
-                    update_task(task.id, status="cancelled", progress="Cancelled")
+                    if current.cancel_requested:
+                        update_task(task.id, status="cancelled", progress="Cancelled")
+                    else:
+                        stop_for_budget(task, spent)
                     return
                 await asyncio.wait({runner}, timeout=0.5)
             result = await runner

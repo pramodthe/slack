@@ -8,7 +8,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from app.band.listener import AgentManager, describe_error, fetch_identity
@@ -16,15 +16,26 @@ from app.auth import encrypt_secret
 from app.band.org import BandOrg
 from app.config import settings
 from app.workspace.events import bus
-from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
+from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Budget, Channel, ChannelMember, DirectMessage, Message,
                                     MessageComponent, MessageDraft, OutsideAgent, Schedule, TaskApproval, TaskSandbox,
                                     TeammateRequest, User, db, dm_owner)
+from app.workspace.audit import record
+from app.workspace.permissions import policy_of, serialize_policy
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context, display_names
+from app.tasks.teammates import settle_interrupted
 
 logger = logging.getLogger(__name__)
 
 bus.audience = dm_owner
+
+# Drafts stream as appended text; every Nth update resends the whole draft so late or lagging clients catch up.
+DRAFT_RESYNC = 10
+
+
+def _js_length(text: str) -> int:
+    """String length as the browser counts it (UTF-16 code units), so append offsets line up."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 class ServiceError(Exception):
@@ -112,15 +123,18 @@ class AppService:
         self._task_poller: asyncio.Task | None = None
         self._teammate_poller: asyncio.Task | None = None
         self._dm_lock = asyncio.Lock()
+        self._register_lock = asyncio.Lock()
 
     # --- lifecycle ---
 
     async def startup(self) -> None:
         with db() as session:
             latest = session.exec(select(Message.id).order_by(Message.id.desc()).limit(1)).first() or 0
+        settle_interrupted()
         self._task_poller = asyncio.create_task(self._watch_task_messages(latest), name="task-messages")
-        self._teammate_poller = asyncio.create_task(self._watch_teammate_requests(), name="teammate-requests")
         await self.org.connect()
+        # Claimed before Band connects, a request would fail with "starting up" although Band is reachable.
+        self._teammate_poller = asyncio.create_task(self._watch_teammate_requests(), name="teammate-requests")
         await self._publish_band_status()
         if not self.org.online:
             return
@@ -153,6 +167,7 @@ class AppService:
         """Bridge worker commits into WebSocket updates: replies, hand-offs, approval requests, and task progress."""
         active: dict[str, dict[str, Any]] = {}
         drafts: dict[str, dict[str, Any]] = {}
+        appends: dict[str, int] = {}
         while True:
             await asyncio.sleep(0.5)
             try:
@@ -164,14 +179,25 @@ class AppService:
                         AgentTask, AgentTask.reply_message_id == Message.id
                     ).where(Message.id > after_id)).all() + session.exec(select(Message).where(
                         Message.id > after_id, Message.band_message_id.startswith("handoff:")
-                        | Message.band_message_id.startswith("approval:"))).all()
+                        | Message.band_message_id.startswith("approval:")
+                        | Message.band_message_id.startswith("budget:"))).all()
                     working = session.exec(select(AgentTask).where(
                         AgentTask.status.in_(["queued", "running", "waiting"]))).all()
                     payloads = serialize_messages(session, sorted(messages, key=lambda m: m.id))
                 # Updates go before replies and removals after, so a draft never reappears or leaves a gap.
                 for task_id, draft in written.items():
-                    if drafts.get(task_id) != draft:
+                    old = drafts.get(task_id)
+                    if old == draft:
+                        continue
+                    if old and draft["content"].startswith(old["content"]) and appends.get(task_id, 0) < DRAFT_RESYNC:
+                        await bus.publish({"type": "draft_append", "task_id": task_id,
+                                           "channel_id": draft["channel_id"], "agent_id": draft["agent_id"],
+                                           "offset": _js_length(old["content"]),
+                                           "text": draft["content"][len(old["content"]):]})
+                        appends[task_id] = appends.get(task_id, 0) + 1
+                    else:
                         await bus.publish({"type": "draft", **draft})
+                        appends[task_id] = 0
                 for payload in payloads:
                     await bus.publish({"type": "message", "message": payload})
                     after_id = payload["id"]
@@ -180,6 +206,7 @@ class AppService:
                     await self.publish_channel(channel_id)
                 for task_id in drafts.keys() - written.keys():
                     await bus.publish({"type": "draft", **drafts[task_id], "content": ""})
+                    appends.pop(task_id, None)
                 drafts = written
                 current = {t.id: {"id": t.id, "channel_id": t.channel_id, "agent_id": t.agent_id,
                                   "status": t.status, "progress": t.progress} for t in working}
@@ -221,6 +248,9 @@ class AppService:
                                               model=request.model, channel_id=request.channel_id,
                                               created_by_agent=request.requested_by_agent_id)
             status, agent_id = "created", profile.id
+        except asyncio.CancelledError:
+            settle_interrupted(request_id)
+            raise
         except ServiceError as exc:
             error = exc.message
         except Exception as exc:
@@ -229,6 +259,11 @@ class AppService:
         with db() as session:
             session.exec(update(TeammateRequest).where(TeammateRequest.id == request_id).values(
                 status=status, agent_id=agent_id, error=error[:500]))
+            if status == "created":
+                record("agent_created", actor_type="agent", actor_id=request.requested_by_agent_id,
+                       actor_name=requester.name if requester else "Agent", channel_id=request.channel_id,
+                       task_id=request.task_id, detail={"agent": profile.name, "role": profile.role,
+                                                        "model": profile.model}, session=session)
             session.commit()
         if status == "created":
             await self.system_message(request.channel_id, f"{requester.name if requester else 'An agent'} created "
@@ -307,6 +342,7 @@ class AppService:
             "outside_agents": [serialize_outside_agent(o) for o in outsiders],
             "is_dm": dm is not None,
             "dm_agent_id": dm.agent_id if dm else None,
+            "policy": serialize_policy(policy_of(session, channel.id)),
         }
 
     async def publish_channel(self, channel_id: int) -> None:
@@ -447,7 +483,8 @@ class AppService:
             raise ServiceError("That Band agent isn't available to invite", 404)
         with db() as session:
             # Agents name teammates in ask_teammate, so a name must point at exactly one of them.
-            if session.exec(select(AgentProfile.id).where(AgentProfile.name == peer["name"])).first():
+            if session.exec(select(AgentProfile.id).where(
+                    func.lower(AgentProfile.name) == peer["name"].lower())).first():
                 raise ServiceError(f"A teammate is already named {peer['name']!r}", 409)
         try:
             await self.org.add_participant(channel.band_room_id, band_id)
@@ -468,13 +505,17 @@ class AppService:
                 raise ServiceError("That agent isn't in this channel", 404)
             channel = session.get(Channel, channel_id)
             name = outsider.name
-            session.delete(outsider)
-            session.commit()
-        if channel.band_room_id and self.org.online:
+        # Leave Band first: dropping only the local row would keep the agent reading the Band room.
+        if channel.band_room_id:
+            self._require_band()
             try:
                 await self.org.remove_participant(channel.band_room_id, band_id)
-            except Exception:
-                logger.exception("Couldn't remove %s from room %s", name, channel.band_room_id)
+            except Exception as exc:
+                raise ServiceError(f"Band couldn't remove the agent: {describe_error(exc)}", 502) from exc
+        with db() as session:
+            if outsider := session.get(OutsideAgent, (channel_id, band_id)):
+                session.delete(outsider)
+                session.commit()
         await self.system_message(channel_id, f"**{name}** was removed from the channel.")
         await self.publish_channel(channel_id)
 
@@ -507,33 +548,39 @@ class AppService:
         name = name.strip()
         if len(name) < 3:
             raise ServiceError("Agent name needs at least 3 characters", 422)
-        with db() as session:
-            if session.exec(select(AgentProfile).where(AgentProfile.name == name)).first():
-                raise ServiceError(f"An agent named {name!r} already exists", 409)
-        role_info = MASTER_ROLE if role == "master" else ROLES[role]
-        try:
-            band_id, api_key = await self.org.register_agent(
-                name, f"{role_info['label']} agent in Band Slack. {role_info['description']}"
+        # Registration awaits Band for seconds; one at a time keeps two requests from claiming the same name.
+        async with self._register_lock:
+            with db() as session:
+                if session.exec(select(AgentProfile).where(func.lower(AgentProfile.name) == name.lower())).first():
+                    raise ServiceError(f"An agent named {name!r} already exists", 409)
+                # Local names win in ask_teammate, so a new agent must not hide an invited outside agent.
+                if outsider := session.exec(select(OutsideAgent).where(
+                        func.lower(OutsideAgent.name) == name.lower())).first():
+                    raise ServiceError(f"The outside Band agent {outsider.name!r} already uses that name", 409)
+            role_info = MASTER_ROLE if role == "master" else ROLES[role]
+            try:
+                band_id, api_key = await self.org.register_agent(
+                    name, f"{role_info['label']} agent in Band Slack. {role_info['description']}"
+                )
+                identity = await fetch_identity(api_key)
+            except Exception as exc:
+                raise ServiceError(f"Band couldn't register the agent: {describe_error(exc)}", 502) from exc
+            profile = AgentProfile(
+                name=identity.name or name,
+                handle=identity.handle,
+                role=role,
+                instructions=instructions.strip(),
+                model=model,
+                band_agent_id=band_id,
+                band_api_key_enc=encrypt_secret(api_key),
+                is_master=is_master,
+                created_by=created_by,
+                created_by_agent=created_by_agent,
             )
-            identity = await fetch_identity(api_key)
-        except Exception as exc:
-            raise ServiceError(f"Band couldn't register the agent: {describe_error(exc)}", 502) from exc
-        profile = AgentProfile(
-            name=identity.name or name,
-            handle=identity.handle,
-            role=role,
-            instructions=instructions.strip(),
-            model=model,
-            band_agent_id=band_id,
-            band_api_key_enc=encrypt_secret(api_key),
-            is_master=is_master,
-            created_by=created_by,
-            created_by_agent=created_by_agent,
-        )
-        with db() as session:
-            session.add(profile)
-            session.commit()
-            session.refresh(profile)
+            with db() as session:
+                session.add(profile)
+                session.commit()
+                session.refresh(profile)
         await self.start_agent(profile)
         await bus.publish({"type": "agent", "agent": self.serialize_agent(profile)})
         return profile
@@ -578,9 +625,11 @@ class AppService:
             for schedule in session.exec(select(Schedule).where(Schedule.agent_id == profile.id)).all():
                 schedule.enabled = False
                 session.add(schedule)
-            for record in session.exec(select(TaskSandbox).where(
+            for sandbox in session.exec(select(TaskSandbox).where(
                     TaskSandbox.task_id.startswith(f"agent-{profile.band_agent_id}-"))).all():
-                session.delete(record)  # The cloud computer itself auto-stops and auto-deletes.
+                session.delete(sandbox)  # The cloud computer itself auto-stops and auto-deletes.
+            if budget := session.get(Budget, ("agent", profile.id)):
+                session.delete(budget)
             for dm in session.exec(select(DirectMessage).where(DirectMessage.agent_id == profile.id)).all():
                 dm.agent_id = None
                 session.add(dm)

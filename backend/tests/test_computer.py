@@ -515,6 +515,10 @@ def test_live_computer_api_requires_membership_and_coordinates_control(desktop_j
         sandbox.stop.reset_mock()
         assert http.post(base + "/stop", headers=member).status_code == 200
         sandbox.stop.assert_awaited_once()
+        events = http.get(f"/api/channels/{task.channel_id}/audit", params={"task_id": task.id}, headers=member).json()
+        assert [e["action"] for e in reversed(events)] == [
+            "computer_taken_over", "computer_handed_back", "computer_download", "computer_upload", "computer_stopped"]
+        assert {e["actor_name"] for e in events} == {"Desktop Tester"}
 
 
 async def _create_computer(computer):
