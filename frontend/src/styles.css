@@ -553,27 +553,3 @@
   }
 }
 
-.computer-sidebar { width: min(560px, 44vw); flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); background: #fafafa; font-size: 13px; }
-.computer-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: white; min-height: 58px; }
-.computer-head-text { flex: 1; min-width: 0; }
-.computer-title { font-weight: 900; font-size: 15px; }
-.computer-sub { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
-.computer-status { text-transform: capitalize; }
-.live-pill { color: #1d9b5f; font-weight: 700; animation: computer-pulse 1.6s ease-in-out infinite; }
-@keyframes computer-pulse { 50% { opacity: 0.45; } }
-.computer-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px 0; }
-.computer-tabs .chip.active { background: var(--active); border-color: var(--active); color: white; }
-.computer-agents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 16px 0; }
-.computer-body { flex: 1; overflow-y: auto; padding: 10px 16px; display: flex; flex-direction: column; gap: 8px; }
-.computer-body p { margin: 0; }
-.computer-body code { overflow-wrap: anywhere; }
-.computer-frame { position: relative; border-radius: 8px; overflow: hidden; background: #181818; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); }
-.computer-screen { display: block; width: 100%; height: auto; }
-.computer-caption { position: absolute; left: 8px; right: 8px; bottom: 8px; padding: 5px 9px; border-radius: 6px; background: rgba(20, 20, 20, 0.78); color: white; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.computer-live { display: block; width: 100%; aspect-ratio: 16 / 10; border: none; border-radius: 8px; background: #181818; }
-.computer-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 36px 16px; text-align: center; border: 1px dashed var(--border); border-radius: 8px; background: white; }
-.computer-empty-icon { font-size: 30px; opacity: 0.6; }
-.computer-control { padding: 6px 10px; border-radius: 6px; background: rgba(255, 196, 0, 0.12); border: 1px solid #d9a400; }
-.computer-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border); background: white; }
-.computer-chip-live { border-color: #1d9b5f; color: #1d9b5f; font-weight: 700; }
-@media (max-width: 900px) { .computer-sidebar { position: fixed; inset: 0 0 0 auto; width: min(100vw, 560px); z-index: 20; box-shadow: -4px 0 16px rgba(0, 0, 0, 0.2); } }

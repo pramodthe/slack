@@ -6,7 +6,7 @@ import type { Artifact, Memory, Message, Schedule, Task, TaskDetail } from "../t
 import type { OpenComputer } from "./Workspace";
 import RichText from "./RichText";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { cn, parseUtc } from "@/lib/utils";
 import { ArtifactCard } from "./assistant-ui/elements/artifact-card";
 import { MemoryChips } from "./assistant-ui/elements/memory-chips";
 import { ScheduleCard } from "./assistant-ui/elements/schedule-card";
@@ -23,9 +23,6 @@ const CARD_STATE: Record<Task["status"], TaskCardState> = {
 };
 
 const isActive = (t: Task) => t.status === "queued" || t.status === "running" || t.status === "waiting";
-
-// SQLite hands back naive UTC timestamps.
-const parseUtc = (iso: string) => new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`);
 
 function since(iso: string) {
   const seconds = Math.max(0, (Date.now() - parseUtc(iso).getTime()) / 1000);
