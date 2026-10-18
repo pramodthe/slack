@@ -220,7 +220,7 @@ def await_approval(task: AgentTask, requests: list[tuple[str, dict]]) -> None:
             session.add(Message(channel_id=task.channel_id, author_type="agent", author_id=task.agent_id,
                                 author_name=profile.name if profile else "Agent", to_humans=True,
                                 content=f"**Approval needed:** {action}" + (f"\n\n{details}" if details else "")
-                                        + "\n\nApprove or deny it in the Agent tasks panel.",
+                                        + "\n\nApprove or deny it on this message.",
                                 band_message_id=f"approval:{approval_id}"))
         # A cancellation requested while the task ran wins over waiting.
         session.exec(update(AgentTask).where(AgentTask.id == task.id, AgentTask.status == "running",
