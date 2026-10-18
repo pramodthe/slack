@@ -1,3 +1,7 @@
+import type { ChartVariant } from "./components/assistant-ui/elements/chart";
+import type { DataTableColumn, DataTableRow } from "./components/assistant-ui/elements/data-table";
+import type { SpecRow } from "./components/assistant-ui/elements/spec-sheet";
+
 export interface User {
   id: number;
   username: string;
@@ -73,8 +77,27 @@ export interface Message {
   content: string;
   mentions: Mention[];
   to_humans: boolean;
+  components: MessageComponent[];
   created_at: string;
 }
+
+export type MessageComponent =
+  | { id: number; kind: "table"; props: { caption: string; columns: DataTableColumn[]; rows: DataTableRow[] } }
+  | {
+      id: number;
+      kind: "chart";
+      props: {
+        label: string;
+        value: string;
+        points: number[];
+        visibleCount: number;
+        delta?: string;
+        trend?: "up" | "down" | "flat";
+        upIsGood?: boolean;
+        variant?: ChartVariant;
+      };
+    }
+  | { id: number; kind: "spec"; props: { title: string; subtitle?: string; rows: SpecRow[]; visibleCount: number } };
 
 export interface TaskActivity {
   id: string;

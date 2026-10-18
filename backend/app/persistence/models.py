@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine
 
 from app.config import settings
@@ -101,6 +101,19 @@ class MessageDraft(SQLModel, table=True):
     agent_id: int
     content: str
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class MessageComponent(SQLModel, table=True):
+    """A table, chart, or spec sheet an agent attached to its reply; linked when the reply is committed."""
+    __table_args__ = (UniqueConstraint("task_id", "tool_call_id"),)
+    id: int | None = Field(default=None, primary_key=True)
+    task_id: str = Field(index=True)
+    tool_call_id: str
+    # Keyed by task, not band_message_id: delivery replaces that with the Band message id.
+    message_id: int | None = Field(default=None, index=True)
+    kind: str  # "table" | "chart" | "spec"
+    props: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class AgentMemory(SQLModel, table=True):

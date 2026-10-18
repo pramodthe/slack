@@ -19,7 +19,8 @@ from app.config import settings
 from app.runtime.harness import build_harness
 from app.runtime.tools.mcp import integration_tools
 from app.computer import TaskComputer
-from app.persistence.models import AgentProfile, AgentTask, Message, MessageDraft, db, init_db, utcnow
+from app.persistence.models import (AgentProfile, AgentTask, Message, MessageComponent, MessageDraft, db, init_db,
+                                    utcnow)
 from app.tasks.drafts import Draft, answer_text, clear_draft
 from app.tasks.schedules import fire_due
 from app.tasks.queue import (approval_decisions, await_approval, is_interim, next_task, queue_report, recover_tasks,
@@ -35,6 +36,7 @@ TOOL_LABELS = {
     "sandbox_write_file": "Writing a file", "sandbox_export_file": "Exporting a file",
     "channel_history": "Reading the channel", "recall_memory": "Checking memory", "remember": "Saving to memory",
     "write_todos": "Planning", "request_approval": "Asking for approval", "schedule_task": "Scheduling",
+    "show_table": "Building a table", "show_chart": "Drawing a chart", "show_spec": "Building a spec sheet",
 }
 
 
@@ -171,6 +173,8 @@ def complete(task: AgentTask, result: str) -> None:
                 session.add(message)
                 session.flush()
                 session.exec(update(AgentTask).where(AgentTask.id == task.id).values(reply_message_id=message.id))
+                session.exec(update(MessageComponent).where(MessageComponent.task_id == task.id,
+                             MessageComponent.message_id == None).values(message_id=message.id))  # noqa: E711
                 if target:
                     queue_report(session, task, target[0], profile.name, result)
         else:

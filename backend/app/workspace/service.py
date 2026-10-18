@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any
@@ -16,7 +17,7 @@ from app.band.org import BandOrg
 from app.config import settings
 from app.workspace.events import bus
 from app.persistence.models import (AgentMemory, AgentTask, AgentProfile, Channel, ChannelMember, DirectMessage, Message,
-                                    MessageDraft, OutsideAgent, Schedule, TaskSandbox, TeammateRequest, User, db,
+                                    MessageComponent, MessageDraft, OutsideAgent, Schedule, TaskSandbox, TeammateRequest, User, db,
                                     dm_owner)
 from app.workspace.roles import MASTER_ROLE, ROLES, role_label
 from app.tasks import channel_context, display_names
@@ -42,7 +43,7 @@ def serialize_user(user: User) -> dict[str, Any]:
     }
 
 
-def serialize_message(message: Message) -> dict[str, Any]:
+def serialize_message(message: Message, components: Sequence[dict[str, Any]] = ()) -> dict[str, Any]:
     return {
         "id": message.id,
         "channel_id": message.channel_id,
@@ -52,8 +53,19 @@ def serialize_message(message: Message) -> dict[str, Any]:
         "content": message.content,
         "mentions": message.mentions,
         "to_humans": message.to_humans,
+        "components": list(components),
         "created_at": message.created_at.isoformat(),
     }
+
+
+def components_for(session: Session, message_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    """Tables, charts, and spec sheets attached to these messages, in the order the agent made them."""
+    found: dict[int, list[dict[str, Any]]] = {}
+    if message_ids:
+        for c in session.exec(select(MessageComponent).where(MessageComponent.message_id.in_(message_ids))
+                              .order_by(MessageComponent.id)).all():
+            found.setdefault(c.message_id, []).append({"id": c.id, "kind": c.kind, "props": c.props})
+    return found
 
 
 def serialize_outside_agent(outsider: OutsideAgent) -> dict[str, Any]:
@@ -139,12 +151,14 @@ class AppService:
                         | Message.band_message_id.startswith("approval:"))).all()
                     working = session.exec(select(AgentTask).where(
                         AgentTask.status.in_(["queued", "running", "waiting"]))).all()
+                    components = components_for(session, [m.id for m in messages])
                 # Updates go before replies and removals after, so a draft never reappears or leaves a gap.
                 for task_id, draft in written.items():
                     if drafts.get(task_id) != draft:
                         await bus.publish({"type": "draft", **draft})
                 for message in sorted(messages, key=lambda m: m.id):
-                    await bus.publish({"type": "message", "message": serialize_message(message)})
+                    await bus.publish({"type": "message",
+                                       "message": serialize_message(message, components.get(message.id, ()))})
                     after_id = message.id
                 # The worker adds hand-off teammates as channel members; refresh member lists once per channel.
                 for channel_id in {m.channel_id for m in messages if (m.band_message_id or "").startswith("handoff:")}:
