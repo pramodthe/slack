@@ -81,7 +81,7 @@ export default function MembersPanel({
         {channel.outside_agents.map((o) => (
           <div key={o.band_id} className="member">
             <Avatar name={o.name} kind="external" size={28} />
-            <span className="member-name static" title={o.description}>
+            <span className="member-name is-static" title={o.description}>
               {o.name}
               <span className="muted small">@{o.handle}</span>
             </span>
@@ -117,7 +117,7 @@ export default function MembersPanel({
         {humans.map((u) => (
           <div key={u.id} className="member">
             <Avatar name={u.display_name} kind="human" size={28} />
-            <span className="member-name static">
+            <span className="member-name is-static">
               {u.display_name}
               <span className="muted small">@{u.username}</span>
             </span>

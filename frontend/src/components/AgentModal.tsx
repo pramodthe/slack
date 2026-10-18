@@ -52,7 +52,7 @@ export default function AgentModal({ state, agent, onClose }: { state: State; ag
           </div>
           <div className="small">
             <span className={`dot dot-${agent.status.state}`} /> {STATE_LABELS[agent.status.state] ?? agent.status.state}
-            {agent.status.error && <span className="error inline"> · {agent.status.error}</span>}
+            {agent.status.error && <span className="error error-inline"> · {agent.status.error}</span>}
           </div>
           {channels.length > 0 && (
             <div className="muted small">In {channels.map((c) => `#${c.name}`).join(", ")}</div>

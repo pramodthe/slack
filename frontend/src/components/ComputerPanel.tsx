@@ -1,40 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, getToken } from "../api";
-import type { Agent } from "../types";
+import type { Agent, ComputerState, FileEntry, LiveView } from "../types";
 import Avatar from "./Avatar";
-
-interface Control {
-  user_name: string;
-  until: string;
-  mine: boolean;
-}
-
-interface ComputerState {
-  configured: boolean;
-  status: string;
-  sandbox_id: string | null;
-  image: string;
-  width: number;
-  height: number;
-  last_action: string;
-  updated_at: string | null;
-  error: string | null;
-  dashboard_url: string;
-  control: Control | null;
-}
-
-interface LiveView {
-  url: string;
-  expires_at: string;
-  control: Control | null;
-}
-
-interface FileEntry {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  size: number;
-}
 
 type Tab = "screen" | "live" | "files";
 

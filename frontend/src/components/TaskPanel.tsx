@@ -1,28 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { State, Action } from "../store";
-import type { Message } from "../types";
+import type { Approval, Memory, Message, Schedule, Task, TaskDetail } from "../types";
 import type { Dispatch } from "react";
 import type { OpenComputer } from "./Workspace";
-
-interface Task {
-  id: string;
-  agent_id: number;
-  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled";
-  progress: string;
-  error: string | null;
-  cancel_requested: boolean;
-  delivery_status: string;
-  updated_at: string;
-}
-interface Memory { key: string; content: string; updated_at: string; }
-interface Approval { id: string; task_id: string; agent_id: number; action: string; details: string; }
-interface Schedule { id: number; agent_id: number; prompt: string; when: string; next_run_at: string | null; }
-
-interface TaskDetail extends Task {
-  result: string;
-  artifacts: { path: string; content: string }[];
-}
 
 export default function TaskPanel({ channelId, state, dispatch, openComputer }: {
   channelId: number; state: State; dispatch: Dispatch<Action>; openComputer: OpenComputer;
